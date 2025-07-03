@@ -1,4 +1,3 @@
-main.py 
 import discord
 from discord.ext import commands
 import asyncio
@@ -178,9 +177,12 @@ class CallTracker:
             cursor.execute('''
                 UPDATE call_sessions 
                 SET saida = ?, duracao_segundos = ?
-                WHERE user_id = ? AND saida IS NULL
-                ORDER BY entrada DESC
-                LIMIT 1
+                WHERE id = (
+                    SELECT id FROM call_sessions
+                    WHERE user_id = ? AND saida IS NULL
+                    ORDER BY entrada DESC
+                    LIMIT 1
+                )
             ''', (saida.isoformat(), duracao, str(user_id)))
 
             # Atualiza estatísticas
@@ -1198,7 +1200,7 @@ class VerificationView(discord.ui.View):
 async def main():
     """Função principal para iniciar o bot"""
     try:
-        TOKEN = "DISCORD_TOKEN"
+        TOKEN = os.getenv ("DISCORD_TOKEN")
 
         if TOKEN == "DISCORD_TOKEN":
             logger.error("❌ Token do bot não configurado! Edite o código e adicione seu token.")
