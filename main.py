@@ -2,19 +2,23 @@ import discord
 from discord.ext import commands
 import asyncio
 import logging
+import os
+from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import os
 import json
 import sqlite3
+import pytz
 
 # Configuração de logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('bot.log'),
+        logging.FileHandler('bot.log', encoding='utf-8'),
         logging.StreamHandler()
-    ]
+    ],
+    encoding='utf-8'
 )
 logger = logging.getLogger(__name__)
 
@@ -32,7 +36,7 @@ CANAIS_VOZ = {
 
 # IDs dos canais de texto
 CANAIS_TEXTO = {
-    "logs-de-inscrição": 1389792394685186108,
+    "logs-de-inscrição": 1389792394685186108, 
     "verificação": 1389791314236932207,
     "suporte-hospitalar": 1389791338580410410,
     "formulário-de-inscrição": 1389791381425487873,
@@ -41,10 +45,13 @@ CANAIS_TEXTO = {
 }
 
 # IDs dos cargos
-CARGOS = {
-    "Visitante": 1390158085808586752,
-    "Médico": 1389789893181444116
+CARGOS_IDS = {
+    "Estagiário": 1389789893181444116,           
+    "Visitante/Observador": 1390158085808586752 
 }
+
+# Fuso horário de São Paulo
+TZ_SAO_PAULO = pytz.timezone('America/Sao_Paulo')
 
 # Arquivo para persistência dos dados de tempo em call
 DADOS_TEMPO_FILE = "dados_tempo_call.json"
@@ -131,7 +138,7 @@ class CallTracker:
     def registrar_entrada(self, user_id, user_name, canal):
         """Registra entrada de usuário em canal de voz"""
         try:
-            entrada = datetime.now()
+            entrada = datetime.now(TZ_SAO_PAULO)
 
             # Adiciona aos usuários ativos
             self.usuarios_ativos[user_id] = {
@@ -166,7 +173,7 @@ class CallTracker:
 
             dados_entrada = self.usuarios_ativos.pop(user_id)
             entrada = dados_entrada['entrada']
-            saida = datetime.now()
+            saida = datetime.now(TZ_SAO_PAULO)
             duracao = int((saida - entrada).total_seconds())
 
             # Atualiza no banco
@@ -197,7 +204,7 @@ class CallTracker:
                     ?, ?
                 )
             ''', (str(user_id), user_name, str(user_id), duracao, str(user_id), 
-                  str(user_id), entrada.isoformat(), saida.isoformat(), datetime.now().isoformat()))
+                  str(user_id), entrada.isoformat(), saida.isoformat(), datetime.now(TZ_SAO_PAULO).isoformat()))
 
             conn.commit()
             conn.close()
@@ -296,7 +303,7 @@ class CallTracker:
             return None
 
         entrada = self.usuarios_ativos[user_id]['entrada']
-        tempo_atual = int((datetime.now() - entrada).total_seconds())
+        tempo_atual = int((datetime.now(TZ_SAO_PAULO) - entrada).total_seconds())
         return tempo_atual
 
     def formatar_tempo(self, segundos):
@@ -359,7 +366,7 @@ class SistemaTempoCall:
 
     def registrar_entrada(self, user_id, canal_nome):
         """Registra entrada de usuário em canal de voz"""
-        agora = datetime.now()
+        agora = datetime.now(TZ_SAO_PAULO)
         self.usuarios_ativos[user_id] = agora
 
         # Inicializa dados do usuário se não existir
@@ -377,7 +384,7 @@ class SistemaTempoCall:
             logger.warning(f"Usuário {user_id} saiu sem entrada registrada")
             return 0
 
-        agora = datetime.now()
+        agora = datetime.now(TZ_SAO_PAULO)
         entrada = self.usuarios_ativos.pop(user_id)
         tempo_sessao = (agora - entrada).total_seconds()
 
@@ -409,7 +416,7 @@ class SistemaTempoCall:
             return None, None
 
         entrada = self.usuarios_ativos[user_id]
-        tempo_atual = (datetime.now() - entrada).total_seconds()
+        tempo_atual = (datetime.now(TZ_SAO_PAULO) - entrada).total_seconds()
         return entrada, tempo_atual
 
     def esta_em_call(self, user_id):
@@ -453,7 +460,7 @@ intents.members = True
 intents.voice_states = True
 
 # Inicialização do bot
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
 # ============== EVENTOS ==============
 
@@ -489,7 +496,7 @@ async def on_member_join(member):
                 title="🎉 Bem-vindo(a)!",
                 description=f"Olá {member.mention}! Seja bem-vindo(a) ao **{member.guild.name}**!",
                 color=discord.Color.green(),
-                timestamp=datetime.now()
+                timestamp=datetime.now(TZ_SAO_PAULO)
             )
             embed.add_field(
                 name="📋 Próximos passos:",
@@ -509,6 +516,7 @@ async def on_member_join(member):
 async def on_voice_state_update(member, before, after):
     """Evento executado quando há mudanças no estado de voz dos membros"""
     try:
+        agora = datetime.now(TZ_SAO_PAULO)
         # Entrada em canal de voz
         if before.channel is None and after.channel is not None:
             logger.info(f"🔊 {member.name} entrou no canal de voz: {after.channel.name}")
@@ -538,37 +546,121 @@ async def on_voice_state_update(member, before, after):
     except Exception as e:
         logger.error(f"Erro no sistema de tempo em call: {e}")
 
+# ============== LÓGICA DE PAGINAÇÃO PARA EMBEDS ==============
+
+# Dicionário para traduzir meses
+MESES_PT = {
+    1: 'janeiro', 2: 'fevereiro', 3: 'março', 4: 'abril', 
+    5: 'maio', 6: 'junho', 7: 'julho', 8: 'agosto', 
+    9: 'setembro', 10: 'outubro', 11: 'novembro', 12: 'dezembro'
+}
+
+def build_pontos_embed(sessoes_pagina, usuario, pagina_atual, total_paginas):
+    """Constrói o embed para a consulta de pontos com um design aprimorado."""
+    embed = discord.Embed(
+        title="⚕️ Histórico de Atividade em Chamada ⚕️",
+        color=discord.Color.dark_red()
+    )
+    embed.set_author(name=f"Relatório de: {usuario.display_name}", icon_url=usuario.avatar.url if usuario.avatar else usuario.default_avatar.url)
+
+    total_duracao_pagina = timedelta()
+
+    if not sessoes_pagina:
+        embed.description = "Não há sessões de voz registradas para esta página."
+    else:
+        lista_sessoes_str = ""
+        for s in sessoes_pagina:
+            entrada = datetime.fromisoformat(s[4])
+            duracao_segundos = s[6] if s[6] is not None else 0
+            total_duracao_pagina += timedelta(seconds=duracao_segundos)
+
+            entrada_sp = entrada.astimezone(TZ_SAO_PAULO)
+
+            nome_mes_pt = MESES_PT[entrada_sp.month]
+            data_formatada = entrada_sp.strftime(f'%d de {nome_mes_pt} de %Y')
+            hora_formatada = entrada_sp.strftime('%H:%M')
+            duracao_formatada = formatar_duracao(duracao_segundos)
+            canal_nome = s[3] if s[3] else "N/A"
+
+            lista_sessoes_str += f"📅 **{data_formatada} às {hora_formatada}**\n"
+            lista_sessoes_str += f"└ ⏱️ **Duração:** `{duracao_formatada}` | 📞 **Canal:** `{canal_nome}`\n\n"
+
+        embed.description = lista_sessoes_str
+
+        embed.add_field(
+            name="__Resumo da Página__",
+            value=f"**Sessões exibidas:** `{len(sessoes_pagina)}`\n"
+                  f"**Tempo total na página:** `{formatar_duracao(total_duracao_pagina.total_seconds())}`",
+            inline=False
+        )
+
+    embed.set_footer(text=f"Página {pagina_atual}/{total_paginas} • MedBot")
+    return embed
+
+class PaginationView(discord.ui.View):
+    """View para criar embeds com botões de paginação para o histórico de chamadas."""
+    def __init__(self, author: discord.Member, all_sessoes: list, usuario_alvo: discord.Member, items_per_page: int = 5):
+        super().__init__(timeout=180)
+        self.author = author
+        self.all_sessoes = all_sessoes
+        self.usuario_alvo = usuario_alvo
+        self.items_per_page = items_per_page
+        self.current_page = 1
+        # Garante que total_pages seja no mínimo 1, mesmo se a lista for vazia.
+        self.total_pages = max(1, (len(self.all_sessoes) + self.items_per_page - 1) // self.items_per_page)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message("❌ Você não tem permissão para usar estes botões.", ephemeral=True)
+            return False
+        return True
+
+    def get_page_data(self):
+        start_index = (self.current_page - 1) * self.items_per_page
+        end_index = start_index + self.items_per_page
+        return self.all_sessoes[start_index:end_index]
+
+    def update_buttons(self):
+        self.children[0].disabled = self.current_page == 1
+        self.children[1].disabled = self.current_page == 1
+        self.children[3].disabled = self.current_page == self.total_pages
+        self.children[4].disabled = self.current_page == self.total_pages
+        self.children[2].label = f"Página {self.current_page}/{self.total_pages}"
+
+    async def update_embed(self, interaction: discord.Interaction):
+        sessoes_pagina = self.get_page_data()
+        self.update_buttons()
+        embed = build_pontos_embed(sessoes_pagina, self.usuario_alvo, self.current_page, self.total_pages)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="⏮️", style=discord.ButtonStyle.blurple, row=0)
+    async def first_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page = 1
+        await self.update_embed(interaction)
+
+    @discord.ui.button(label="◀️", style=discord.ButtonStyle.secondary, row=0)
+    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page > 1:
+            self.current_page -= 1
+        await self.update_embed(interaction)
+
+    @discord.ui.button(label="Página X/Y", style=discord.ButtonStyle.grey, disabled=True, row=0)
+    async def page_label(self, interaction: discord.Interaction, button: discord.ui.Button):
+        pass
+
+    @discord.ui.button(label="▶️", style=discord.ButtonStyle.secondary, row=0)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page < self.total_pages:
+            self.current_page += 1
+        await self.update_embed(interaction)
+
+    @discord.ui.button(label="⏭️", style=discord.ButtonStyle.blurple, row=0)
+    async def last_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page = self.total_pages
+        await self.update_embed(interaction)
+
+
 # ============== COMANDOS ORIGINAIS (MANTIDOS) ==============
-
-@bot.command(name='ping')
-async def ping(ctx):
-    """Comando para verificar a latência do bot"""
-    latency = round(bot.latency * 1000)
-
-    embed = discord.Embed(
-        title="🏓 Pong!",
-        description=f"Latência: **{latency}ms**",
-        color=discord.Color.blue()
-    )
-
-    await ctx.send(embed=embed)
-    logger.info(f"Comando ping executado por {ctx.author.name}")
-
-@bot.command(name='tempo')
-async def tempo(ctx):
-    """Comando para mostrar a hora atual"""
-    now = datetime.now()
-    time_formatted = now.strftime("%d/%m/%Y às %H:%M:%S")
-
-    embed = discord.Embed(
-        title="🕐 Hora Atual",
-        description=f"**{time_formatted}**",
-        color=discord.Color.gold(),
-        timestamp=now
-    )
-
-    await ctx.send(embed=embed)
-    logger.info(f"Comando tempo executado por {ctx.author.name}")
 
 @bot.command(name='verificar')
 async def verificar(ctx):
@@ -577,7 +669,8 @@ async def verificar(ctx):
     embed = discord.Embed(
         title="✅ Sistema de Verificação Hospitalar",
         description="Para acessar o servidor, você precisa se verificar preenchendo o formulário abaixo.",
-        color=discord.Color.green()
+        color=discord.Color.green(),
+        timestamp=datetime.now(TZ_SAO_PAULO)
     )
     embed.add_field(
         name="📋 Informações necessárias:",
@@ -602,63 +695,37 @@ async def verificar(ctx):
     await ctx.send(embed=embed, view=view)
     logger.info(f"Sistema de verificação iniciado por {ctx.author.name}")
 
-@bot.command(name='pontototal')
-async def pontototal(ctx):
-    """Comando para verificar tempo total acumulado em calls"""
-    try:
-        user_id = ctx.author.id
+@bot.command(name='ping')
+async def ping(ctx):
+    """Comando para verificar a latência do bot"""
+    latency = round(bot.latency * 1000)
 
-        # Obtém tempo total acumulado
-        tempo_total = sistema_tempo.obter_tempo_total(user_id)
+    embed = discord.Embed(
+        title="🏓 Pong!",
+        description=f"Latência: **{latency}ms**",
+        color=discord.Color.blue()
+    )
 
-        # Verifica se está em call atualmente
-        entrada_atual, tempo_atual = sistema_tempo.obter_tempo_atual(user_id)
+    await ctx.send(embed=embed)
+    logger.info(f"Comando ping executado por {ctx.author.name}")
 
-        # Cria embed com informações
-        embed = discord.Embed(
-            title="⏱️ Tempo Total em Calls",
-            color=discord.Color.blue(),
-            timestamp=datetime.now()
-        )
+@bot.command(name='tempo')
+async def tempo(ctx):
+    """Comando para mostrar a hora atual"""
+    agora = datetime.now(TZ_SAO_PAULO)
+    nome_mes_pt = MESES_PT[agora.month]
+    data_formatada = agora.strftime(f'%d de {nome_mes_pt} de %Y')
+    hora_formatada = agora.strftime('%H:%M:%S')
 
-        embed.add_field(
-            name="📊 Tempo Total Acumulado",
-            value=f"**{sistema_tempo.formatar_tempo(tempo_total)}**",
-            inline=False
-        )
+    embed = discord.Embed(
+        title="🕐 Hora Atual",
+        description=f"**{data_formatada} às {hora_formatada}**",
+        color=discord.Color.gold(),
+        timestamp=datetime.now(TZ_SAO_PAULO)
+    )
 
-        if entrada_atual:
-            # Usuário está em call
-            embed.add_field(
-                name="🔊 Status Atual",
-                value=f"**Em call** desde {entrada_atual.strftime('%d/%m/%Y às %H:%M:%S')}\n"
-                      f"Tempo da sessão atual: **{sistema_tempo.formatar_tempo(tempo_atual)}**",
-                inline=False
-            )
-            embed.color = discord.Color.green()
-        else:
-            # Usuário não está em call
-            embed.add_field(
-                name="🔇 Status Atual",
-                value="**Não está em call no momento**",
-                inline=False
-            )
-
-        # Adiciona informações do usuário
-        embed.set_author(
-            name=f"Relatório de {ctx.author.display_name}",
-            icon_url=ctx.author.avatar.url if ctx.author.avatar else ctx.author.default_avatar.url
-        )
-        embed.set_footer(text="Sistema de Pontos por Call")
-
-        await ctx.send(embed=embed)
-        logger.info(f"Comando pontototal executado por {ctx.author.name}")
-
-    except Exception as e:
-        logger.error(f"Erro no comando pontototal: {e}")
-        await ctx.send("❌ Ocorreu um erro ao obter suas informações de tempo!")
-
-# ============== NOVOS COMANDOS DE RASTREAMENTO DE CHAMADAS ==============
+    await ctx.send(embed=embed)
+    logger.info(f"Comando tempo executado por {ctx.author.name}")
 
 @bot.command(name='minhachamada')
 async def minha_chamada(ctx):
@@ -684,7 +751,7 @@ async def minha_chamada(ctx):
         embed = discord.Embed(
             title="📊 Suas Estatísticas de Calls",
             color=discord.Color.blue(),
-            timestamp=datetime.now()
+            timestamp=datetime.now(TZ_SAO_PAULO)
         )
 
         # Tempo total
@@ -774,7 +841,7 @@ async def ranking_chamadas(ctx):
             title="🏆 Ranking de Calls - Top 10",
             description="Os usuários mais ativos em chamadas de voz do servidor:",
             color=discord.Color.gold(),
-            timestamp=datetime.now()
+            timestamp=datetime.now(TZ_SAO_PAULO)
         )
 
         # Emojis de medalhas
@@ -859,7 +926,7 @@ async def stats_call(ctx, member: discord.Member = None):
         embed = discord.Embed(
             title="📊 Estatísticas Detalhadas de Calls",
             color=discord.Color.purple(),
-            timestamp=datetime.now()
+            timestamp=datetime.now(TZ_SAO_PAULO)
         )
 
         # Informações principais
@@ -967,7 +1034,7 @@ async def top_calls(ctx):
             title="📊 Estatísticas Gerais do Servidor",
             description="Resumo da atividade em calls de voz:",
             color=discord.Color.blue(),
-            timestamp=datetime.now()
+            timestamp=datetime.now(TZ_SAO_PAULO)
         )
 
         # Estatísticas gerais
@@ -1034,18 +1101,88 @@ async def top_calls(ctx):
         logger.error(f"Erro no comando topcalls: {e}")
         await ctx.send("❌ Ocorreu um erro ao obter as estatísticas do servidor!")
 
+# ============== COMANDO DE AJUDA INTERATIVO ==============
+
+class HelpSelect(discord.ui.Select):
+    """Dropdown para selecionar categorias de ajuda."""
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Comandos Gerais", description="Comandos para todos os membros.", emoji="🏥"),
+            discord.SelectOption(label="Estatísticas de Chamadas", description="Comandos para visualizar tempos e rankings.", emoji="📊"),
+            discord.SelectOption(label="Moderação", description="Comandos para a equipe de moderação.", emoji="🛠️")
+        ]
+        super().__init__(placeholder="Selecione uma categoria...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        # Obtém a categoria selecionada e cria um novo embed
+        selected_category = self.values[0]
+        embed = discord.Embed(
+            title=f"⚕️ Categoria: {selected_category} ⚕️",
+            color=discord.Color.red(),
+            timestamp=datetime.now(TZ_SAO_PAULO)
+        )
+        embed.set_footer(text=f"Use !help <comando> para mais detalhes sobre um comando específico.")
+
+        if selected_category == "Comandos Gerais":
+            embed.description = "Comandos essenciais disponíveis para todos os membros."
+            embed.add_field(name="`!ping`", value="Verifica a latência e o tempo de resposta do bot.", inline=False)
+            embed.add_field(name="`!tempo`", value="Mostra a data e hora atuais do servidor.", inline=False)
+            embed.add_field(name="`!verificar`", value="Inicia o processo de verificação para obter acesso.", inline=False)
+            embed.add_field(name="`!help`", value="Exibe esta mensagem de ajuda interativa.", inline=False)
+
+        elif selected_category == "Estatísticas de Chamadas":
+            embed.description = "Comandos para consultar seu tempo em chamada e ver rankings."
+            embed.add_field(name="`!minhachamada`", value="Consulta suas estatísticas pessoais de tempo em chamada.", inline=False)
+            embed.add_field(name="`!consultar`", value="Consulta seu histórico completo de tempo em chamadas.", inline=False)
+            embed.add_field(name="`!rankingchamadas`", value="Mostra o ranking dos usuários mais ativos em chamadas de voz.", inline=False)
+            embed.add_field(name="`!topcalls`", value="Exibe as estatísticas gerais de chamadas do servidor.", inline=False)
+
+        elif selected_category == "Moderação":
+            embed.description = "Comandos restritos para a equipe de moderação para gerenciar o bot."
+            embed.add_field(name="`!statscall <usuário>`", value="Consulta as estatísticas de chamada de um usuário específico.", inline=False)
+
+        # Edita a mensagem original com o novo embed da categoria
+        await interaction.response.edit_message(embed=embed)
+
+
+class HelpView(discord.ui.View):
+    """View que contém o dropdown de ajuda."""
+    def __init__(self):
+        super().__init__(timeout=180) # O menu expira em 3 minutos
+        self.add_item(HelpSelect())
+
+
+@bot.command(name='help', help="Mostra esta mensagem de ajuda interativa.")
+async def help_command(ctx):
+    """Mostra uma mensagem de ajuda interativa com um menu de seleção."""
+    embed = discord.Embed(
+        title="⚕️ Central de Ajuda do MedBot ⚕️",
+        description="Bem-vindo(a) à central de ajuda!\n\n"
+                    "Use o menu suspenso abaixo para navegar pelas categorias de comandos. "
+                    "Cada categoria listará os comandos disponíveis e suas funções.",
+        color=discord.Color.dark_red(),
+        timestamp=datetime.now(TZ_SAO_PAULO)
+    )
+    if ctx.bot.user.avatar:
+        embed.set_thumbnail(url=ctx.bot.user.avatar.url)
+    embed.set_footer(text="Selecione uma categoria para ver os comandos.")
+
+    view = HelpView()
+    await ctx.send(embed=embed, view=view)
+
+
 # ============== SISTEMA DE VERIFICAÇÃO (MANTIDO INTOCADO) ==============
 
-class VerificationModal(discord.ui.Modal):
+class VerificationModal(discord.ui.Modal, title='Formulário de Verificação'):
     """Modal para coleta de informações de verificação"""
 
     def __init__(self):
-        super().__init__(title="Verificação Hospitalar")
+        super().__init__()
 
         # Campo nome
         self.nome = discord.ui.TextInput(
-            label="Nome Completo",
-            placeholder="Digite seu nome completo...",
+            label="📋 Nome Completo",
+            placeholder="Digite seu nome completo",
             required=True,
             max_length=50
         )
@@ -1053,17 +1190,17 @@ class VerificationModal(discord.ui.Modal):
 
         # Campo ID
         self.id_usuario = discord.ui.TextInput(
-            label="ID (5 dígitos)",
+            label="🆔 ID (até 5 dígitos)",
             placeholder="Ex: 12345",
             required=True,
-            min_length=5,
+            min_length=1,
             max_length=5
         )
         self.add_item(self.id_usuario)
 
         # Campo telefone
         self.telefone = discord.ui.TextInput(
-            label="Telefone",
+            label="📞 Telefone",
             placeholder="Ex: 123-456",
             required=True,
             min_length=7,
@@ -1073,7 +1210,7 @@ class VerificationModal(discord.ui.Modal):
 
         # Campo tipo de acesso
         self.tipo_acesso = discord.ui.TextInput(
-            label="Tipo de Acesso",
+            label="🏷️ Tipo de Acesso",
             placeholder="Digite: Visitante ou Médico",
             required=True,
             max_length=15
@@ -1083,105 +1220,102 @@ class VerificationModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         """Processa o formulário de verificação"""
         try:
-            # Valida ID (apenas números)
+            # Validações dos campos
             if not self.id_usuario.value.isdigit():
                 await interaction.response.send_message("❌ ID deve conter apenas números!", ephemeral=True)
                 return
 
-            # Valida telefone (formato XXX-XXX)
             if not self.telefone.value.count('-') == 1:
                 await interaction.response.send_message("❌ Telefone deve estar no formato XXX-XXX!", ephemeral=True)
                 return
 
-            # Valida tipo de acesso
-            tipo_valido = self.tipo_acesso.value.lower()
+            tipo_valido = self.tipo_acesso.value.strip().lower()
             if tipo_valido not in ['visitante', 'médico', 'medico']:
                 await interaction.response.send_message("❌ Tipo de acesso deve ser 'Visitante' ou 'Médico'!", ephemeral=True)
                 return
 
-            # Normaliza tipo de acesso
+            # Processamento e atribuição de cargos
+            guild = interaction.guild
             tipo_final = "Médico" if tipo_valido in ['médico', 'medico'] else "Visitante"
 
-            # Cria novo apelido
-            novo_apelido = f"{self.nome.value} | {self.id_usuario.value}"
+            cargo_key = "Estagiário" if tipo_final == "Médico" else "Visitante/Observador"
+            cargo_id = CARGOS_IDS.get(cargo_key)
+            cargo = guild.get_role(cargo_id) if cargo_id else None
 
-            # Altera apelido do usuário
-            try:
-                await interaction.user.edit(nick=novo_apelido)
-            except discord.Forbidden:
-                await interaction.response.send_message("❌ Não tenho permissão para alterar seu apelido!", ephemeral=True)
+            if not cargo:
+                await interaction.response.send_message(f"❌ O cargo '{cargo_key}' não foi encontrado ou configurado. Contate um admin.", ephemeral=True)
                 return
 
-            # Adiciona cargo
-            guild = interaction.guild
-            cargo_id = CARGOS.get(tipo_final)
+            await interaction.user.add_roles(cargo)
 
-            if cargo_id:
-                cargo = guild.get_role(cargo_id)
-                if cargo:
-                    await interaction.user.add_roles(cargo)
-                else:
-                    logger.warning(f"Cargo {tipo_final} não encontrado no servidor")
+            # Altera apelido
+            novo_apelido = f"{self.nome.value} | {self.id_usuario.value}"
+            await interaction.user.edit(nick=novo_apelido)
 
-            # Cria embed de confirmação
-            embed = discord.Embed(
-                title="✅ Verificação Concluída!",
-                description=f"Bem-vindo(a) ao sistema hospitalar, **{self.nome.value}**!",
-                color=discord.Color.green(),
-                timestamp=datetime.now()
+            # Mensagem de sucesso bonita com tema vermelho
+            embed_sucesso = discord.Embed(
+                title="⚕️ Verificação Concluída ⚕️",
+                description=f"Bem-vindo(a) ao sistema, **{interaction.user.mention}**!",
+                color=discord.Color.red(),
+                timestamp=datetime.now(TZ_SAO_PAULO)
             )
+            embed_sucesso.set_thumbnail(url=interaction.user.avatar.url if interaction.user.avatar else interaction.user.default_avatar.url)
 
-            embed.add_field(
-                name="📋 Informações Registradas:",
-                value=f"**Nome:** {self.nome.value}\n"
-                      f"**ID:** {self.id_usuario.value}\n"
-                      f"**Telefone:** {self.telefone.value}\n"
-                      f"**Tipo de Acesso:** {tipo_final}",
+            embed_sucesso.add_field(
+                name="__Informações Registradas__",
+                value=f"**Nome:** `{self.nome.value}`\n"
+                      f"**ID:** `{self.id_usuario.value}`\n"
+                      f"**Telefone:** `{self.telefone.value}`\n"
+                      f"**Tipo:** `{tipo_final}`",
                 inline=False
             )
 
-            embed.add_field(
-                name="⚡ Alterações Aplicadas:",
-                value=f"• Apelido alterado para: `{novo_apelido}`\n"
-                      f"• Cargo adicionado: **{tipo_final}**\n"
-                      f"• Acesso liberado aos canais do servidor",
+            # Adiciona um campo em branco para espaçamento
+            embed_sucesso.add_field(name="\u200b", value="\u200b", inline=False)
+
+            embed_sucesso.add_field(
+                name="__Alterações Aplicadas__",
+                value=f"**Apelido alterado para:** `{novo_apelido}`\n"
+                      f"**Cargo atribuído:** {cargo.mention}",
                 inline=False
             )
 
-            embed.set_footer(text="Sistema de Verificação Hospitalar")
-            embed.set_thumbnail(url=interaction.user.avatar.url if interaction.user.avatar else interaction.user.default_avatar.url)
+            embed_sucesso.set_footer(text=f"Sistema de Verificação • {interaction.guild.name}")
+            await interaction.response.send_message(embed=embed_sucesso, ephemeral=True)
+            logger.info(f"Usuário {interaction.user.name} verificado com sucesso.")
 
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-            # Log da verificação
-            logger.info(f"Verificação concluída: {self.nome.value} ({self.id_usuario.value}) - {tipo_final}")
-
-            # Envia log para canal de logs se existir
+            # Envia log para canal de logs se existir (com tema vermelho)
             canal_logs = guild.get_channel(CANAIS_TEXTO.get("logs-de-inscrição"))
             if canal_logs:
                 log_embed = discord.Embed(
-                    title="📝 Nova Verificação",
-                    description=f"Usuário verificado com sucesso",
-                    color=discord.Color.blue(),
-                    timestamp=datetime.now()
-                )
-                log_embed.add_field(
-                    name="👤 Usuário",
-                    value=f"**{interaction.user.mention}**\n`{interaction.user.name}`",
-                    inline=True
-                )
-                log_embed.add_field(
-                    name="📋 Dados",
-                    value=f"**Nome:** {self.nome.value}\n**ID:** {self.id_usuario.value}\n**Tipo:** {tipo_final}",
-                    inline=True
+                    title="⚕️ Nova Verificação Realizada ⚕️",
+                    color=discord.Color.dark_red(),
+                    timestamp=datetime.now(TZ_SAO_PAULO)
                 )
                 log_embed.set_thumbnail(url=interaction.user.avatar.url if interaction.user.avatar else interaction.user.default_avatar.url)
+
+                log_embed.add_field(
+                    name="👤 Usuário", 
+                    value=f"{interaction.user.mention}\n`{interaction.user.name}` (ID: `{interaction.user.id}`)", 
+                    inline=False
+                )
+
+                log_embed.add_field(name="📋 Nome Completo", value=f"**`{self.nome.value}`**", inline=True)
+                log_embed.add_field(name="🆔 ID", value=f"**`{self.id_usuario.value}`**", inline=True)
+                log_embed.add_field(name="📞 Telefone", value=f"**`{self.telefone.value}`**", inline=True)
+
+                log_embed.add_field(name="🏷️ Tipo", value=f"**`{tipo_final}`**", inline=True)
+                log_embed.add_field(name="📝 Apelido", value=f"**`{novo_apelido}`**", inline=True)
+                log_embed.add_field(name="🎯 Cargo Atribuído", value=f"**{cargo.mention}**", inline=True)
+
+                log_embed.set_footer(text=f"Sistema de Verificação • {interaction.guild.name}")
 
                 await canal_logs.send(embed=log_embed)
 
         except Exception as e:
-            logger.error(f"Erro na verificação: {e}")
-            await interaction.response.send_message("❌ Ocorreu um erro durante a verificação. Tente novamente!", ephemeral=True)
+            logger.error(f"Erro na verificação de {interaction.user.name}: {e}")
+            await interaction.response.send_message("❌ Ocorreu um erro inesperado. Tente novamente.", ephemeral=True)
+
 
 class VerificationView(discord.ui.View):
     """View com botão para iniciar verificação"""
@@ -1197,19 +1331,24 @@ class VerificationView(discord.ui.View):
 
 # ==================== EXECUÇÃO ====================
 
+import os
+from dotenv import load_dotenv
+
 async def main():
     """Função principal para iniciar o bot"""
     try:
-        TOKEN = os.getenv ("DISCORD_TOKEN")
+        # Carrega variáveis de ambiente do arquivo .env
+        load_dotenv()
+        TOKEN = os.getenv("DISCORD_TOKEN")
 
-        if TOKEN == "DISCORD_TOKEN":
-            logger.error("❌ Token do bot não configurado! Edite o código e adicione seu token.")
+        if not TOKEN or TOKEN == "seu_token_aqui":
+            logger.error("❌ Token do bot não configurado! Crie um arquivo .env e adicione seu DISCORD_TOKEN.")
             return
 
         await bot.start(TOKEN)
 
     except discord.LoginFailure:
-        logger.error("❌ Token inválido! Verifique se o token está correto.")
+        logger.error("❌ Token inválido! Verifique se o token no arquivo .env está correto.")
     except discord.HTTPException as e:
         logger.error(f"❌ Erro HTTP: {e}")
     except Exception as e:
@@ -1224,3 +1363,45 @@ if __name__ == "__main__":
         logger.error(f"❌ Erro fatal: {e}")
     finally:
         print("Bot finalizado.")
+
+@bot.command(name='consultar', aliases=['pontos_consultar'], help="Consulta seu histórico de tempo em chamadas.")
+async def consultar_command(ctx, usuario: discord.Member = None):
+    """Consulta o histórico de tempo em chamadas de um usuário com paginação."""
+    if usuario is None:
+        usuario = ctx.author
+
+    try:
+        conn = sqlite3.connect(call_tracker.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT id, user_id, user_name, canal, entrada, saida, duracao_segundos
+            FROM call_sessions
+            WHERE user_id = ?
+            ORDER BY entrada DESC
+        ''', (str(usuario.id),))
+
+        sessoes = cursor.fetchall()
+        conn.close()
+
+        if not sessoes:
+            embed = discord.Embed(
+                title="⚕️ Histórico de Atividade em Chamada ⚕️",
+                description="Não há sessões de voz registradas para este usuário.",
+                color=discord.Color.dark_red()
+            )
+            embed.set_author(name=f"Relatório de: {usuario.display_name}", icon_url=usuario.avatar.url if usuario.avatar else usuario.default_avatar.url)
+            await ctx.send(embed=embed)
+            return
+
+        view = PaginationView(author=ctx.author, all_sessoes=sessoes, usuario_alvo=usuario, items_per_page=5)
+
+        initial_sessoes = view.get_page_data()
+        initial_embed = build_pontos_embed(initial_sessoes, usuario, 1, view.total_pages)
+
+        await ctx.send(embed=initial_embed, view=view)
+        logger.info(f"Comando consultar executado por {ctx.author.name} para o usuário {usuario.name}")
+
+    except Exception as e:
+        logger.error(f"Erro no comando consultar: {e}")
+        await ctx.send("❌ Ocorreu um erro ao consultar o histórico.")
