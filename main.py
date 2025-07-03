@@ -503,10 +503,22 @@ async def on_member_join(member):
                 value="• Leia as regras do servidor\n• Complete a verificação se necessário\n• Apresente-se para a comunidade!",
                 inline=False
             )
-            embed.set_thumbnail(url=member.avatar.url if member.avatar else member.default_avatar.url)
-            embed.set_footer(text=f"Membro #{member.guild.member_count}")
+            embed.add_field(
+                name="⚡ Após a verificação:",
+                value="• Seu apelido será alterado para `Nome | ID`\n• Você receberá o cargo apropriado\n• Terá acesso aos canais do servidor",
+                inline=False
+            )
+            embed.add_field(
+                name="📌 Importante:",
+                value="Certifique-se de preencher todas as informações corretamente antes de enviar o formulário.",
+                inline=False
+            )
+            embed.set_footer(text="Sistema de Verificação • Clique no botão abaixo para começar")
 
-            await welcome_channel.send(embed=embed)
+            # Cria a view com o botão
+            view = VerificationView()
+
+            await welcome_channel.send(embed=embed, view=view)
             logger.info(f"Mensagem de boas-vindas enviada para {member.name}")
 
     except Exception as e:
@@ -573,18 +585,18 @@ def build_pontos_embed(sessoes_pagina, usuario, pagina_atual, total_paginas):
             entrada = datetime.fromisoformat(s[4])
             duracao_segundos = s[6] if s[6] is not None else 0
             total_duracao_pagina += timedelta(seconds=duracao_segundos)
-
+            
             entrada_sp = entrada.astimezone(TZ_SAO_PAULO)
-
+            
             nome_mes_pt = MESES_PT[entrada_sp.month]
             data_formatada = entrada_sp.strftime(f'%d de {nome_mes_pt} de %Y')
             hora_formatada = entrada_sp.strftime('%H:%M')
             duracao_formatada = formatar_duracao(duracao_segundos)
             canal_nome = s[3] if s[3] else "N/A"
-
+            
             lista_sessoes_str += f"📅 **{data_formatada} às {hora_formatada}**\n"
             lista_sessoes_str += f"└ ⏱️ **Duração:** `{duracao_formatada}` | 📞 **Canal:** `{canal_nome}`\n\n"
-
+            
         embed.description = lista_sessoes_str
 
         embed.add_field(
@@ -608,6 +620,7 @@ class PaginationView(discord.ui.View):
         self.current_page = 1
         # Garante que total_pages seja no mínimo 1, mesmo se a lista for vazia.
         self.total_pages = max(1, (len(self.all_sessoes) + self.items_per_page - 1) // self.items_per_page)
+        self.update_buttons()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author.id:
@@ -716,7 +729,7 @@ async def tempo(ctx):
     nome_mes_pt = MESES_PT[agora.month]
     data_formatada = agora.strftime(f'%d de {nome_mes_pt} de %Y')
     hora_formatada = agora.strftime('%H:%M:%S')
-
+    
     embed = discord.Embed(
         title="🕐 Hora Atual",
         description=f"**{data_formatada} às {hora_formatada}**",
@@ -1140,7 +1153,7 @@ class HelpSelect(discord.ui.Select):
         elif selected_category == "Moderação":
             embed.description = "Comandos restritos para a equipe de moderação para gerenciar o bot."
             embed.add_field(name="`!statscall <usuário>`", value="Consulta as estatísticas de chamada de um usuário específico.", inline=False)
-
+        
         # Edita a mensagem original com o novo embed da categoria
         await interaction.response.edit_message(embed=embed)
 
@@ -1237,7 +1250,7 @@ class VerificationModal(discord.ui.Modal, title='Formulário de Verificação'):
             # Processamento e atribuição de cargos
             guild = interaction.guild
             tipo_final = "Médico" if tipo_valido in ['médico', 'medico'] else "Visitante"
-
+            
             cargo_key = "Estagiário" if tipo_final == "Médico" else "Visitante/Observador"
             cargo_id = CARGOS_IDS.get(cargo_key)
             cargo = guild.get_role(cargo_id) if cargo_id else None
@@ -1269,7 +1282,7 @@ class VerificationModal(discord.ui.Modal, title='Formulário de Verificação'):
                       f"**Tipo:** `{tipo_final}`",
                 inline=False
             )
-
+            
             # Adiciona um campo em branco para espaçamento
             embed_sucesso.add_field(name="\u200b", value="\u200b", inline=False)
 
@@ -1293,17 +1306,17 @@ class VerificationModal(discord.ui.Modal, title='Formulário de Verificação'):
                     timestamp=datetime.now(TZ_SAO_PAULO)
                 )
                 log_embed.set_thumbnail(url=interaction.user.avatar.url if interaction.user.avatar else interaction.user.default_avatar.url)
-
+                
                 log_embed.add_field(
                     name="👤 Usuário", 
                     value=f"{interaction.user.mention}\n`{interaction.user.name}` (ID: `{interaction.user.id}`)", 
                     inline=False
                 )
-
+                
                 log_embed.add_field(name="📋 Nome Completo", value=f"**`{self.nome.value}`**", inline=True)
                 log_embed.add_field(name="🆔 ID", value=f"**`{self.id_usuario.value}`**", inline=True)
                 log_embed.add_field(name="📞 Telefone", value=f"**`{self.telefone.value}`**", inline=True)
-
+                
                 log_embed.add_field(name="🏷️ Tipo", value=f"**`{tipo_final}`**", inline=True)
                 log_embed.add_field(name="📝 Apelido", value=f"**`{novo_apelido}`**", inline=True)
                 log_embed.add_field(name="🎯 Cargo Atribuído", value=f"**{cargo.mention}**", inline=True)
@@ -1395,10 +1408,10 @@ async def consultar_command(ctx, usuario: discord.Member = None):
             return
 
         view = PaginationView(author=ctx.author, all_sessoes=sessoes, usuario_alvo=usuario, items_per_page=5)
-
+        
         initial_sessoes = view.get_page_data()
         initial_embed = build_pontos_embed(initial_sessoes, usuario, 1, view.total_pages)
-
+        
         await ctx.send(embed=initial_embed, view=view)
         logger.info(f"Comando consultar executado por {ctx.author.name} para o usuário {usuario.name}")
 
