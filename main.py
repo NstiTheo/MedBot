@@ -55,6 +55,43 @@ TZ_SAO_PAULO = pytz.timezone('America/Sao_Paulo')
 # Arquivo para persistência dos dados de tempo em call
 DADOS_TEMPO_FILE = "dados_tempo_call.json"
 
+# URL do GIF de branding
+SP_CAPITAL_GIF_URL = "https://cdn.discordapp.com/attachments/1388624317159440536/1388624464694087700/SP_Capital_GIF.gif"
+
+# ID do canal para logs de plantão
+CANAL_CONTROLE_PLANTOES_ID = 1389792336363655168 # sp-capital-controle-de-plantões
+CANAL_MODERACAO_ID = 1389792372983992420 # moderação-e-disciplinas
+
+# IDs de Cargos de Punição
+CARGO_PUNICAO_1_ID = 1389790132160434227
+CARGO_PUNICAO_2_ID = 1389790188452184226
+
+# Estrutura Hierárquica de Cargos
+HIERARQUIA_CARGOS = [
+    {"nome": "Direção", "id": 1389788983214604338, "emoji": "🎖️"},
+    {"nome": "Responsável HP", "id": 1389789535097061426, "emoji": "🛡️"},
+    {"nome": "Auxiliar HP", "id": 1389789661769240606, "emoji": "🧰"},
+    {"nome": "Diretor", "id": 1389789326287573013, "emoji": "🧠"},
+    {"nome": "Vice Diretor", "id": 1389789427542397083, "emoji": "🧪"},
+    {"nome": "Paramédico", "id": 1389789708539920517, "emoji": "🚑"},
+    {"nome": "Médico", "id": 1389789787325730948, "emoji": "🩺"},
+    {"nome": "Enfermeiro", "id": 1389789872134553650, "emoji": "💉"},
+    {"nome": "Estagiário", "id": 1389789893181444116, "emoji": "🧪"},
+    {"nome": "Visitante/Observador", "id": 1390158085808586752, "emoji": "🧾"}
+]
+
+# IDs de Cargos Profissionais (para o comando !setar)
+CARGOS_SETAveis_IDS = {
+    1389789708539920517, # Paramédico
+    1389789787325730948, # Médico
+    1389789872134553650  # Enfermeiro
+}
+
+# Cores Padrão
+COR_PRINCIPAL = discord.Color.dark_red()
+COR_VERDE = discord.Color.green()
+COR_LARANJA = discord.Color.orange()
+
 # ============== NOVO SISTEMA DE RASTREAMENTO DE CHAMADAS ==============
 
 
@@ -347,6 +384,67 @@ class CallTracker:
             secs = segundos % 60
             return f"{hours}h {mins}m {secs}s"
 
+    def formatar_tempo_hhmmss(self, segundos):
+        """Formata segundos para o formato HH:MM:SS."""
+        segundos = int(segundos)
+        horas = segundos // 3600
+        minutos = (segundos % 3600) // 60
+        segundos_restantes = segundos % 60
+        return f"{horas:02}:{minutos:02}:{segundos_restantes:02}"
+
+    def get_user_rank(self, user_id):
+        """Obtém a posição de um usuário no ranking."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT user_id FROM call_stats ORDER BY total_segundos DESC
+            ''')
+            ranking = cursor.fetchall()
+            conn.close()
+
+            for i, (uid, ) in enumerate(ranking):
+                if str(user_id) == uid:
+                    return i + 1
+            return None
+        except Exception as e:
+            logger.error(f"Erro ao obter rank do usuário {user_id}: {e}")
+            return None
+
+    def reset_user_calls(self, user_id):
+        """Apaga todos os registros de chamadas e estatísticas de um usuário."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            # Apaga sessões individuais
+            cursor.execute("DELETE FROM call_sessions WHERE user_id = ?", (str(user_id),))
+            # Apaga estatísticas agregadas
+            cursor.execute("DELETE FROM call_stats WHERE user_id = ?", (str(user_id),))
+            conn.commit()
+            conn.close()
+            logger.info(f"Todos os registros de chamadas e estatísticas para o user_id {user_id} foram apagados.")
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Erro ao apagar registros para o user_id {user_id}: {e}")
+            return False
+
+    def reset_all_calls(self):
+        """Apaga TODOS os registros de chamadas e estatísticas do banco de dados."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM call_sessions")
+            cursor.execute("DELETE FROM call_stats")
+            cursor.execute("DELETE FROM active_users")
+            conn.commit()
+            conn.close()
+            self.usuarios_ativos.clear()
+            logger.info("TODOS os registros de chamadas, estatísticas e usuários ativos foram apagados.")
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Erro ao apagar todos os registros: {e}")
+            return False
+
     def recuperar_usuarios_em_call(self, bot):
         """Recupera usuários em call após reinicialização"""
         try:
@@ -364,135 +462,7 @@ class CallTracker:
             logger.error(f"Erro ao recuperar usuários: {e}")
 
 
-# ============== SISTEMA DE TEMPO EM CALL (MANTIDO PARA COMPATIBILIDADE) ==============
-
-
-class SistemaTempoCall:
-    """Sistema para gerenciar tempo de usuários em calls de voz"""
-
-    def __init__(self):
-        self.usuarios_ativos = {}  # {user_id: datetime_entrada}
-        self.dados_tempo = {}  # {user_id: {total_segundos, historico}}
-        self.carregar_dados()
-
-    def carregar_dados(self):
-        """Carrega dados salvos do arquivo JSON"""
-        try:
-            if os.path.exists(DADOS_TEMPO_FILE):
-                with open(DADOS_TEMPO_FILE, 'r', encoding='utf-8') as f:
-                    self.dados_tempo = json.load(f)
-                logger.info("Dados de tempo em call carregados com sucesso")
-            else:
-                logger.info(
-                    "Arquivo de dados não encontrado, iniciando com dados vazios"
-                )
-        except Exception as e:
-            logger.error(f"Erro ao carregar dados de tempo: {e}")
-            self.dados_tempo = {}
-
-    def salvar_dados(self):
-        """Salva dados no arquivo JSON"""
-        try:
-            with open(DADOS_TEMPO_FILE, 'w', encoding='utf-8') as f:
-                json.dump(self.dados_tempo, f, ensure_ascii=False, indent=2)
-            logger.info("Dados de tempo em call salvos com sucesso")
-        except Exception as e:
-            logger.error(f"Erro ao salvar dados de tempo: {e}")
-
-    def registrar_entrada(self, user_id, canal_nome):
-        """Registra entrada de usuário em canal de voz"""
-        agora = datetime.now(TZ_SAO_PAULO)
-        self.usuarios_ativos[user_id] = agora
-
-        # Inicializa dados do usuário se não existir
-        if str(user_id) not in self.dados_tempo:
-            self.dados_tempo[str(user_id)] = {
-                "total_segundos": 0,
-                "historico": []
-            }
-
-        logger.info(
-            f"Usuário {user_id} entrou no canal {canal_nome} às {agora.strftime('%H:%M:%S')}"
-        )
-
-    def registrar_saida(self, user_id, canal_nome):
-        """Registra saída de usuário e calcula tempo da sessão"""
-        if user_id not in self.usuarios_ativos:
-            logger.warning(f"Usuário {user_id} saiu sem entrada registrada")
-            return 0
-
-        agora = datetime.now(TZ_SAO_PAULO)
-        entrada = self.usuarios_ativos.pop(user_id)
-        tempo_sessao = (agora - entrada).total_seconds()
-
-        # Atualiza dados do usuário
-        user_data = self.dados_tempo[str(user_id)]
-        user_data["total_segundos"] += tempo_sessao
-        user_data["historico"].append({
-            "entrada": entrada.isoformat(),
-            "saida": agora.isoformat(),
-            "canal": canal_nome,
-            "duracao_segundos": tempo_sessao
-        })
-
-        # Salva dados automaticamente
-        self.salvar_dados()
-
-        logger.info(
-            f"Usuário {user_id} saiu do canal {canal_nome}. Tempo da sessão: {self.formatar_tempo(tempo_sessao)}"
-        )
-        return tempo_sessao
-
-    def obter_tempo_total(self, user_id):
-        """Obtém tempo total acumulado do usuário"""
-        if str(user_id) not in self.dados_tempo:
-            return 0
-        return self.dados_tempo[str(user_id)]["total_segundos"]
-
-    def obter_tempo_atual(self, user_id):
-        """Obtém tempo da sessão atual (se em call)"""
-        if user_id not in self.usuarios_ativos:
-            return None, None
-
-        entrada = self.usuarios_ativos[user_id]
-        tempo_atual = (datetime.now(TZ_SAO_PAULO) - entrada).total_seconds()
-        return entrada, tempo_atual
-
-    def esta_em_call(self, user_id):
-        """Verifica se usuário está em call no momento"""
-        return user_id in self.usuarios_ativos
-
-    def formatar_tempo(self, segundos):
-        """Formata tempo em segundos para formato legível"""
-        if segundos < 60:
-            return f"{int(segundos)}s"
-        elif segundos < 3600:
-            mins = int(segundos // 60)
-            secs = int(segundos % 60)
-            return f"{mins}m {secs}s"
-        else:
-            hours = int(segundos // 3600)
-            mins = int((segundos % 3600) // 60)
-            secs = int(segundos % 60)
-            return f"{hours}h {mins}m {secs}s"
-
-    def recuperar_usuarios_ativos(self, bot):
-        """Recupera usuários que estavam em call quando o bot foi reiniciado"""
-        try:
-            for guild in bot.guilds:
-                for channel in guild.voice_channels:
-                    for member in channel.members:
-                        if member.id not in self.usuarios_ativos:
-                            self.registrar_entrada(member.id, channel.name)
-                            logger.info(
-                                f"Recuperado usuário {member.name} em {channel.name}"
-                            )
-        except Exception as e:
-            logger.error(f"Erro ao recuperar usuários ativos: {e}")
-
-
-# Instâncias globais dos sistemas
-sistema_tempo = SistemaTempoCall()
+# Instância global do novo sistema
 call_tracker = CallTracker()  # NOVO SISTEMA
 
 # Configuração dos intents (permissões do bot)
@@ -514,7 +484,6 @@ async def on_ready():
     logger.info(f'Bot conectado em {len(bot.guilds)} servidor(es)')
 
     # Recupera usuários que estavam em call antes do reinício
-    sistema_tempo.recuperar_usuarios_ativos(bot)
     call_tracker.recuperar_usuarios_em_call(bot)  # NOVO
 
     # Ativa o status do bot
@@ -559,6 +528,7 @@ async def on_member_join(member):
             embed.set_footer(
                 text=
                 "Sistema de Verificação • Clique no botão abaixo para começar")
+            embed.set_thumbnail(url=SP_CAPITAL_GIF_URL)
 
             # Cria a view com o botão
             view = VerificationView()
@@ -572,47 +542,65 @@ async def on_member_join(member):
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    """Evento executado quando há mudanças no estado de voz dos membros"""
-    try:
-        agora = datetime.now(TZ_SAO_PAULO)
-        # Entrada em canal de voz
-        if before.channel is None and after.channel is not None:
-            logger.info(
-                f"🔊 {member.name} entrou no canal de voz: {after.channel.name}"
-            )
-            # Registra entrada no sistema de tempo (MANTIDO)
-            sistema_tempo.registrar_entrada(member.id, after.channel.name)
-            # Registra entrada no novo sistema (NOVO)
-            call_tracker.registrar_entrada(member.id, member.display_name,
-                                           after.channel.name)
+    """Monitora as atividades de voz dos membros e registra no canal de plantão."""
+    if member.bot:
+        return
 
-        # Saída de canal de voz
-        elif before.channel is not None and after.channel is None:
-            logger.info(
-                f"🔇 {member.name} saiu do canal de voz: {before.channel.name}")
-            # Registra saída e calcula tempo da sessão (MANTIDO)
-            tempo_sessao = sistema_tempo.registrar_saida(
-                member.id, before.channel.name)
-            # Registra saída no novo sistema (NOVO)
-            call_tracker.registrar_saida(member.id, member.display_name,
-                                         before.channel.name)
+    canal_log = bot.get_channel(CANAL_CONTROLE_PLANTOES_ID)
+    afk_channel_id = 1388624317159440539  # Certifique-se que este é o ID correto do seu canal AFK
 
-        # Mudança entre canais de voz
-        elif before.channel != after.channel and before.channel is not None and after.channel is not None:
-            logger.info(
-                f"🔄 {member.name} mudou de {before.channel.name} para {after.channel.name}"
-            )
-            # Registra saída do canal anterior e entrada no novo (MANTIDO)
-            sistema_tempo.registrar_saida(member.id, before.channel.name)
-            sistema_tempo.registrar_entrada(member.id, after.channel.name)
-            # Registra mudança no novo sistema (NOVO)
-            call_tracker.registrar_saida(member.id, member.display_name,
-                                         before.channel.name)
-            call_tracker.registrar_entrada(member.id, member.display_name,
-                                           after.channel.name)
+    # Função auxiliar para enviar logs de forma segura
+    async def enviar_log(embed):
+        if canal_log:
+            try:
+                await canal_log.send(embed=embed)
+            except Exception as e:
+                logger.error(f"Falha ao enviar log para o canal de plantão: {e}")
 
-    except Exception as e:
-        logger.error(f"Erro no sistema de tempo em call: {e}")
+    # Caso 1: Usuário entra em um canal de voz
+    if before.channel is None and after.channel is not None:
+        if after.channel.id != afk_channel_id:
+            call_tracker.registrar_entrada(member.id, member.display_name, after.channel.name)
+
+        embed = discord.Embed(
+            description=f"▶️ {member.mention} entrou no canal de voz `{after.channel.name}`.",
+            color=COR_VERDE,
+            timestamp=datetime.now(TZ_SAO_PAULO)
+        ).set_author(name=member.display_name, icon_url=member.display_avatar.url)
+        await enviar_log(embed)
+
+    # Caso 2: Usuário sai de um canal de voz
+    elif before.channel is not None and after.channel is None:
+        if before.channel.id != afk_channel_id:
+            call_tracker.registrar_saida(member.id, member.display_name, before.channel.name)
+
+        embed = discord.Embed(
+            description=f"⏹️ {member.mention} saiu do canal de voz `{before.channel.name}`.",
+            color=COR_PRINCIPAL,
+            timestamp=datetime.now(TZ_SAO_PAULO)
+        ).set_author(name=member.display_name, icon_url=member.display_avatar.url)
+        await enviar_log(embed)
+
+    # Caso 3: Usuário muda de canal de voz
+    elif before.channel is not None and after.channel is not None and before.channel != after.channel:
+        # Lógica de contagem de tempo com AFK
+        # Saiu de um canal válido e foi para o AFK
+        if before.channel.id != afk_channel_id and after.channel.id == afk_channel_id:
+            call_tracker.registrar_saida(member.id, member.display_name, before.channel.name)
+        # Saiu do AFK e foi para um canal válido
+        elif before.channel.id == afk_channel_id and after.channel.id != afk_channel_id:
+            call_tracker.registrar_entrada(member.id, member.display_name, after.channel.name)
+        # Mudou entre dois canais válidos
+        elif before.channel.id != afk_channel_id and after.channel.id != afk_channel_id:
+            call_tracker.registrar_saida(member.id, member.display_name, before.channel.name)
+            call_tracker.registrar_entrada(member.id, member.display_name, after.channel.name)
+
+        embed = discord.Embed(
+            description=f"🔄 {member.mention} mudou do canal `{before.channel.name}` para `{after.channel.name}`.",
+            color=COR_LARANJA,
+            timestamp=datetime.now(TZ_SAO_PAULO)
+        ).set_author(name=member.display_name, icon_url=member.display_avatar.url)
+        await enviar_log(embed)
 
 
 # ============== LÓGICA DE PAGINAÇÃO PARA EMBEDS ==============
@@ -634,45 +622,66 @@ MESES_PT = {
 }
 
 
-def build_pontos_embed(sessoes_pagina, usuario, pagina_atual, total_paginas):
-    """Constrói o embed para a consulta de pontos com um design aprimorado."""
-    embed = discord.Embed(title="⚕️ Histórico de Atividade em Chamada ⚕️",
-                          color=discord.Color.dark_red())
-    embed.set_author(name=f"Relatório de: {usuario.display_name}",
-                     icon_url=usuario.avatar.url
-                     if usuario.avatar else usuario.default_avatar.url)
+def build_consultar_embed(sessoes_pagina, usuario, pagina_atual, total_paginas, total_segundos_geral, rank):
+    """Constrói o embed modernizado para a consulta de histórico de chamadas."""
+    embed = discord.Embed(
+        title="📜 Histórico de Sessões",
+        color=discord.Color.from_rgb(255, 0, 0), # Vermelho
+        timestamp=datetime.now(TZ_SAO_PAULO)
+    )
+    embed.set_author(
+        name=f"Relatório de {usuario.display_name}",
+        icon_url=usuario.avatar.url if usuario.avatar else usuario.default_avatar.url
+    )
+    embed.set_thumbnail(url=SP_CAPITAL_GIF_URL)
 
-    total_duracao_pagina = timedelta()
+    # --- Header com Resumo Geral e Ranking ---
+    tempo_total_formatado = call_tracker.formatar_tempo_hhmmss(total_segundos_geral)
 
+    rank_badge = ""
+    if rank:
+        if rank == 1:
+            rank_badge = "🥇 **Lenda das Calls**"
+        elif rank <= 10:
+            rank_badge = f"🏆 **Top {rank}**"
+        else:
+            rank_badge = f"#{rank}"
+
+    header_text = f"**Tempo Total:** `{tempo_total_formatado}`\n"
+    if rank_badge:
+        header_text += f"**Ranking:** {rank_badge}"
+
+    embed.add_field(name="📈 Resumo de Performance", value=header_text, inline=False)
+
+    # --- Detalhes das Sessões na Página ---
     if not sessoes_pagina:
         embed.description = "Não há sessões de voz registradas para esta página."
     else:
-        lista_sessoes_str = ""
+        lista_sessoes_str = []
+        last_date_str = None
         for s in sessoes_pagina:
-            entrada = datetime.fromisoformat(s[4])
+            entrada = datetime.fromisoformat(s[4]).astimezone(TZ_SAO_PAULO)
             duracao_segundos = s[6] if s[6] is not None else 0
-            total_duracao_pagina += timedelta(seconds=duracao_segundos)
-
-            entrada_sp = entrada.astimezone(TZ_SAO_PAULO)
-
-            nome_mes_pt = MESES_PT[entrada_sp.month]
-            data_formatada = entrada_sp.strftime(f'%d de {nome_mes_pt} de %Y')
-            hora_formatada = entrada_sp.strftime('%H:%M')
-            duracao_formatada = call_tracker.formatar_tempo(duracao_segundos)
+            duracao_formatada = call_tracker.formatar_tempo_hhmmss(duracao_segundos)
             canal_nome = s[3] if s[3] else "N/A"
 
-            lista_sessoes_str += f"📅 **{data_formatada} às {hora_formatada}**\n"
-            lista_sessoes_str += f"└ ⏱️ **Duração:** `{duracao_formatada}` | 📞 **Canal:** `{canal_nome}`\n\n"
+            nome_mes_pt = MESES_PT[entrada.month]
+            current_date_str = entrada.strftime(f'%d de {nome_mes_pt} de %Y')
 
-        embed.description = lista_sessoes_str
+            if current_date_str != last_date_str:
+                if last_date_str is not None:
+                    lista_sessoes_str.append("") # Espaço entre dias
+                # Adiciona separador de data
+                lista_sessoes_str.append(f"**__{current_date_str}__**")
+                last_date_str = current_date_str
 
-        embed.add_field(
-            name="__Resumo da Página__",
-            value=f"**Sessões exibidas:** `{len(sessoes_pagina)}`\n"
-            f"**Tempo total na página:** `{call_tracker.formatar_tempo(total_duracao_pagina.total_seconds())}`",
-            inline=False)
+            hora_formatada = entrada.strftime('%H:%M')
 
-    embed.set_footer(text=f"Página {pagina_atual}/{total_paginas} • MedBot")
+            lista_sessoes_str.append(f"› **`{hora_formatada}`** em `{canal_nome}` | **Duração:** `{duracao_formatada}`")
+
+        embed.description = "\n".join(lista_sessoes_str)
+
+    embed.set_footer(text=f"Página {pagina_atual}/{total_paginas} • Histórico de {usuario.display_name}")
     return embed
 
 
@@ -683,14 +692,17 @@ class PaginationView(discord.ui.View):
                  author: discord.Member,
                  all_sessoes: list,
                  usuario_alvo: discord.Member,
+                 total_segundos: int,
+                 rank: int,
                  items_per_page: int = 5):
         super().__init__(timeout=180)
         self.author = author
         self.all_sessoes = all_sessoes
         self.usuario_alvo = usuario_alvo
+        self.total_segundos = total_segundos
+        self.rank = rank
         self.items_per_page = items_per_page
         self.current_page = 1
-        # Garante que total_pages seja no mínimo 1, mesmo se a lista for vazia.
         self.total_pages = max(
             1, (len(self.all_sessoes) + self.items_per_page - 1) //
             self.items_per_page)
@@ -721,17 +733,18 @@ class PaginationView(discord.ui.View):
     async def update_embed(self, interaction: discord.Interaction):
         sessoes_pagina = self.get_page_data()
         self.update_buttons()
-        embed = build_pontos_embed(sessoes_pagina, self.usuario_alvo,
-                                   self.current_page, self.total_pages)
+        embed = build_consultar_embed(sessoes_pagina, self.usuario_alvo,
+                                      self.current_page, self.total_pages,
+                                      self.total_segundos, self.rank)
         await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(label="⏮️", style=discord.ButtonStyle.blurple, row=0)
+    @discord.ui.button(label="⏪", style=discord.ButtonStyle.primary, row=0)
     async def first_page(self, interaction: discord.Interaction,
                          button: discord.ui.Button):
         self.current_page = 1
         await self.update_embed(interaction)
 
-    @discord.ui.button(label="◀️", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="⬅️", style=discord.ButtonStyle.secondary, row=0)
     async def prev_page(self, interaction: discord.Interaction,
                         button: discord.ui.Button):
         if self.current_page > 1:
@@ -746,18 +759,54 @@ class PaginationView(discord.ui.View):
                          button: discord.ui.Button):
         pass
 
-    @discord.ui.button(label="▶️", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="➡️", style=discord.ButtonStyle.secondary, row=0)
     async def next_page(self, interaction: discord.Interaction,
                         button: discord.ui.Button):
         if self.current_page < self.total_pages:
             self.current_page += 1
         await self.update_embed(interaction)
 
-    @discord.ui.button(label="⏭️", style=discord.ButtonStyle.blurple, row=0)
+    @discord.ui.button(label="⏩", style=discord.ButtonStyle.primary, row=0)
     async def last_page(self, interaction: discord.Interaction,
                         button: discord.ui.Button):
         self.current_page = self.total_pages
         await self.update_embed(interaction)
+
+
+class ConfirmationView(discord.ui.View):
+    """View para confirmação de ações críticas."""
+
+    def __init__(self, author: discord.Member, target_user: discord.Member):
+        super().__init__(timeout=60)
+        self.author = author
+        self.target_user = target_user
+        self.confirmed = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message(
+                "❌ Você não tem permissão para usar estes botões.",
+                ephemeral=True
+            )
+            return False
+        return True
+
+    async def disable_buttons(self, interaction: discord.Interaction):
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(view=self)
+
+    @discord.ui.button(label="Confirmar", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.confirmed = True
+        await self.disable_buttons(interaction)
+        self.stop()
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.confirmed = False
+        await self.disable_buttons(interaction)
+        self.stop()
 
 
 # ============== COMANDOS ORIGINAIS ==============
@@ -771,7 +820,7 @@ async def verificar(ctx):
         title="✅ Sistema de Verificação Hospitalar",
         description=
         "Para acessar o servidor, você precisa se verificar preenchendo o formulário abaixo.",
-        color=discord.Color.green(),
+        color=discord.Color.from_rgb(255, 0, 0), # Vermelho
         timestamp=datetime.now(TZ_SAO_PAULO))
     embed.add_field(
         name="📋 Informações necessárias:",
@@ -805,7 +854,8 @@ async def ping(ctx):
 
     embed = discord.Embed(title="🏓 Pong!",
                           description=f"Latência: **{latency}ms**",
-                          color=discord.Color.blue())
+                          color=COR_PRINCIPAL)
+    embed.set_thumbnail(url=SP_CAPITAL_GIF_URL)
 
     await ctx.send(embed=embed)
     logger.info(f"Comando ping executado por {ctx.author.name}")
@@ -822,376 +872,203 @@ async def tempo(ctx):
     embed = discord.Embed(
         title="🕐 Hora Atual",
         description=f"**{data_formatada} às {hora_formatada}**",
-        color=discord.Color.gold(),
+        color=COR_PRINCIPAL,
         timestamp=datetime.now(TZ_SAO_PAULO))
+    embed.set_thumbnail(url=SP_CAPITAL_GIF_URL)
 
     await ctx.send(embed=embed)
     logger.info(f"Comando tempo executado por {ctx.author.name}")
 
 
-@bot.command(name='minhachamada')
-async def minha_chamada(ctx):
-    """Comando individual para consultar estatísticas pessoais de calls"""
-    try:
-        user_id = ctx.author.id
-        stats = call_tracker.obter_estatisticas_usuario(user_id)
+@bot.command(name='chamada', aliases=['minhachamada'])
+async def chamada(ctx):
+    """Exibe um painel com o status da sua sessão de chamada atual."""
+    user_id = ctx.author.id
 
-        if not stats:
-            embed = discord.Embed(
-                title="📊 Suas Estatísticas de Calls",
-                description=
-                "Você ainda não possui histórico de calls registradas.",
-                color=discord.Color.orange())
-            embed.set_author(
-                name=ctx.author.display_name,
-                icon_url=ctx.author.avatar.url
-                if ctx.author.avatar else ctx.author.default_avatar.url)
-            await ctx.send(embed=embed)
-            return
-
-        # Cria embed com estatísticas
-        embed = discord.Embed(title="📊 Suas Estatísticas de Calls",
-                              color=discord.Color.blue(),
-                              timestamp=datetime.now(TZ_SAO_PAULO))
-
-        # Tempo total
-        embed.add_field(
-            name="⏱️ Tempo Total em Calls",
-            value=f"**{call_tracker.formatar_tempo(stats['total_segundos'])}**",
-            inline=True)
-
-        # Quantidade de sessões
-        embed.add_field(name="🎙️ Total de Sessões",
-                        value=f"**{stats['total_sessoes']}**",
-                        inline=True)
-
-        # Média por sessão
-        embed.add_field(
-            name="📈 Média por Sessão",
-            value=f"**{call_tracker.formatar_tempo(stats['media_segundos'])}**",
-            inline=True)
-
-        # Status atual
-        tempo_atual = call_tracker.obter_tempo_atual(user_id)
-        if tempo_atual:
-            embed.add_field(
-                name="🔊 Status Atual",
-                value=
-                f"**Em call agora!**\nTempo da sessão atual: **{call_tracker.formatar_tempo(tempo_atual)}**",
-                inline=False)
-            embed.color = discord.Color.green()
-        else:
-            embed.add_field(name="🔇 Status Atual",
-                            value="**Não está em call no momento**",
-                            inline=False)
-
-        # Última call
-        if stats['ultima_call']:
-            embed.add_field(
-                name="📅 Última Call",
-                value=
-                f"**{stats['ultima_call'].strftime('%d/%m/%Y às %H:%M')}**",
-                inline=True)
-
-
-# Primeira call
-        if stats['primeira_call']:
-            embed.add_field(
-                name="🔹 Primeira Call",
-                value=
-                f"**{stats['primeira_call'].strftime('%d/%m/%Y às %H:%M')}**",
-                inline=True)
-
-        # Adiciona autor
-        embed.set_author(name=f"Relatório de {ctx.author.display_name}",
-                         icon_url=ctx.author.avatar.url if ctx.author.avatar
-                         else ctx.author.default_avatar.url)
-        embed.set_footer(text="Sistema de Rastreamento de Calls • Atualizado")
-
-        await ctx.send(embed=embed)
-        logger.info(f"Comando minhachamada executado por {ctx.author.name}")
-
-    except Exception as e:
-        logger.error(f"Erro no comando minhachamada: {e}")
-        await ctx.send("❌ Ocorreu um erro ao obter suas estatísticas de calls!"
-                       )
-
-
-@bot.command(name='rankingchamadas')
-async def ranking_chamadas(ctx):
-    """Comando para mostrar ranking dos usuários mais ativos em calls"""
-    try:
-        ranking = call_tracker.obter_ranking(10)
-
-        if not ranking:
-            embed = discord.Embed(
-                title="🏆 Ranking de Calls",
-                description=
-                "Ainda não há dados de calls registradas no servidor.",
-                color=discord.Color.orange())
-            await ctx.send(embed=embed)
-            return
-
-        # Cria embed principal
+    if user_id not in call_tracker.usuarios_ativos:
         embed = discord.Embed(
-            title="🏆 Ranking de Calls - Top 10",
-            description=
-            "Os usuários mais ativos em chamadas de voz do servidor:",
-            color=discord.Color.gold(),
-            timestamp=datetime.now(TZ_SAO_PAULO))
+            title="**📞 Status da Chamada**",
+            description="Você não está em uma chamada de voz no momento.",
+            color=discord.Color.from_rgb(255, 0, 0), # Vermelho
+        )
+        embed.set_thumbnail(url=SP_CAPITAL_GIF_URL)
+        embed.set_footer(text="Entre em um canal de voz para ver seu status.")
+        await ctx.send(embed=embed)
+        return
 
-        # Emojis de medalhas
+    # Dados da sessão ativa
+    dados_sessao = call_tracker.usuarios_ativos[user_id]
+    canal_nome = dados_sessao['canal']
+    entrada = dados_sessao['entrada']
+    duracao_segundos = (datetime.now(TZ_SAO_PAULO) - entrada).total_seconds()
+
+    embed = discord.Embed(
+        title="**📞 Painel de Sessão Ativa**",
+        color=COR_VERDE,
+        timestamp=datetime.now(TZ_SAO_PAULO)
+    )
+    embed.set_thumbnail(url=SP_CAPITAL_GIF_URL)
+    embed.set_author(
+        name=ctx.author.display_name,
+        icon_url=ctx.author.avatar.url if ctx.author.avatar else ctx.author.default_avatar.url
+    )
+    embed.add_field(
+        name="**Status**",
+        value="🟢 **Online**",
+        inline=True
+    )
+    embed.add_field(
+        name="**Canal Atual**",
+        value=f"`{canal_nome}`",
+        inline=True
+    )
+    embed.add_field(
+        name="**Tempo da Sessão**",
+        value=f"**`{call_tracker.formatar_tempo_hhmmss(duracao_segundos)}`**",
+        inline=False
+    )
+    embed.set_footer(text="Este é um snapshot do momento atual.")
+
+    await ctx.send(embed=embed)
+    logger.info(f"Comando chamada executado por {ctx.author.name}")
+
+
+@bot.command(name='rankingchamadas', aliases=['topcalls'])
+async def ranking_chamadas(ctx):
+    """Exibe o ranking dos usuários mais ativos em chamadas de voz."""
+    try:
+        ranking_data = call_tracker.obter_ranking(10)
+
+        if not ranking_data:
+            embed = discord.Embed(
+                title="🏆 Ranking de Chamadas",
+                description="Ainda não há dados de chamadas para exibir no ranking.",
+                color=discord.Color.from_rgb(255, 0, 0) # Vermelho
+            )
+            embed.set_thumbnail(url=SP_CAPITAL_GIF_URL)
+            await ctx.send(embed=embed)
+            return
+
+        embed = discord.Embed(
+            title="🏆 Ranking de Atividade em Chamada",
+            description="Os membros mais lendários do servidor, classificados por tempo total em chamada.",
+            color=COR_PRINCIPAL,
+            timestamp=datetime.now(TZ_SAO_PAULO)
+        )
+        embed.set_thumbnail(url=SP_CAPITAL_GIF_URL)
+
+        ranking_list_str = []
         medals = ["🥇", "🥈", "🥉"]
-        colors = [
-            discord.Color.gold(),
-            discord.Color.from_rgb(192, 192, 192),
-            discord.Color.from_rgb(205, 127, 50)
-        ]
 
-        for i, user_data in enumerate(ranking):
+        for i, user_data in enumerate(ranking_data):
             position = i + 1
-            medal = medals[i] if i < 3 else f"{position}º"
+            try:
+                user = await bot.fetch_user(user_data['user_id'])
+                display_name = user.display_name
+            except discord.NotFound:
+                display_name = user_data.get('user_name', 'Usuário Desconhecido')
 
-            # Busca o usuário no servidor
-            user = ctx.guild.get_member(user_data['user_id'])
-            display_name = user.display_name if user else user_data['user_name']
+            medal = medals[i] if i < 3 else f"`#{position:02}`"
 
-            # Calcula média por sessão
-            media_segundos = user_data['total_segundos'] / user_data[
-                'total_sessoes']
+            total_time_formatted = call_tracker.formatar_tempo_hhmmss(user_data['total_segundos'])
 
-            # Formata última call
-            ultima_call = "Não registrada"
-            if user_data['ultima_call']:
-                ultima_call = user_data['ultima_call'].strftime(
-                    '%d/%m/%Y às %H:%M')
+            ranking_list_str.append(
+                f"{medal} **{display_name}**\n"
+                f"> `Tempo Total:` {total_time_formatted}"
+            )
 
-            # Cria campo para cada usuário
-            field_value = (
-                f"⏱️ **Tempo Total:** {call_tracker.formatar_tempo(user_data['total_segundos'])}\n"
-                f"🎙️ **Sessões:** {user_data['total_sessoes']}\n"
-                f"📈 **Média:** {call_tracker.formatar_tempo(media_segundos)}\n"
-                f"📅 **Última Call:** {ultima_call}")
+        embed.add_field(
+            name="Top 10 - Lendas das Calls",
+            value="\n\n".join(ranking_list_str),
+            inline=False
+        )
 
-            embed.add_field(name=f"{medal} {display_name}",
-                            value=field_value,
-                            inline=True)
-
-            # Adiciona separador a cada 3 usuários para melhor visualização
-            if position % 3 == 0 and position < len(ranking):
-                embed.add_field(name="\u200b", value="\u200b", inline=False)
-
-        # Muda cor do embed baseado no top 3
-        if len(ranking) > 0:
-            embed.color = colors[0]  # Ouro para o ranking geral
-
-        embed.set_footer(
-            text=f"Ranking atualizado • {len(ranking)} usuários ativos")
+        embed.set_footer(text="Use !consultar para ver seus detalhes ou !statscall para o de outros.")
 
         await ctx.send(embed=embed)
         logger.info(f"Comando rankingchamadas executado por {ctx.author.name}")
 
     except Exception as e:
         logger.error(f"Erro no comando rankingchamadas: {e}")
-        await ctx.send("❌ Ocorreu um erro ao obter o ranking de calls!")
+        await ctx.send("❌ Ocorreu um erro ao obter o ranking de chamadas.")
 
 
 @bot.command(name='statscall')
 async def stats_call(ctx, member: discord.Member = None):
-    """Comando para moderadores consultarem estatísticas de qualquer usuário"""
+    """Exibe um relatório de atividade em chamadas de um usuário."""
     try:
-        # Se não especificar usuário, mostra do próprio autor
         target_user = member or ctx.author
 
-        # Verifica se o autor tem permissão para ver stats de outros
         if member and not ctx.author.guild_permissions.manage_messages:
-            await ctx.send(
-                "❌ Você não tem permissão para consultar estatísticas de outros usuários!"
-            )
+            await ctx.send("\u274c Você não tem permissão para consultar as estatísticas de outros usuários.")
             return
 
         stats = call_tracker.obter_estatisticas_usuario(target_user.id)
 
-        if not stats:
+        if not stats or stats['total_sessoes'] == 0:
             embed = discord.Embed(
-                title="📊 Estatísticas de Calls",
-                description=
-                f"{target_user.display_name} ainda não possui histórico de calls registradas.",
-                color=discord.Color.orange())
-            embed.set_author(
-                name=target_user.display_name,
-                icon_url=target_user.avatar.url
-                if target_user.avatar else target_user.default_avatar.url)
+                title="\ud83d\udcbb Análise de Atividade",
+                description=f"{target_user.mention} ainda não possui um histórico de chamadas.",
+                color=discord.Color.from_rgb(255, 170, 0)  # Laranja
+            )
+            embed.set_author(name=target_user.display_name, icon_url=target_user.display_avatar.url)
+            embed.set_thumbnail(url=SP_CAPITAL_GIF_URL)
             await ctx.send(embed=embed)
             return
 
-        # Cria embed detalhado
-        embed = discord.Embed(title="📊 Estatísticas Detalhadas de Calls",
-                              color=discord.Color.purple(),
-                              timestamp=datetime.now(TZ_SAO_PAULO))
+        user_rank = call_tracker.get_user_rank(target_user.id)
+        rank_badge = "\ud83c\udf96\ufe0f Top " + str(user_rank) if user_rank and user_rank <= 10 else f"#{user_rank}"
+        rank_text = f"**Posição no Ranking:** {rank_badge}" if user_rank else "Não ranqueado"
 
-        # Informações principais
+        embed = discord.Embed(
+            title="\ud83d\udcbb Análise de Atividade de Chamada",
+            color=COR_PRINCIPAL,
+            timestamp=datetime.now(TZ_SAO_PAULO)
+        )
+        embed.set_author(name=target_user.display_name, icon_url=target_user.display_avatar.url)
+        embed.set_thumbnail(url=SP_CAPITAL_GIF_URL)
+
+        # --- Estatísticas Gerais ---
         embed.add_field(
-            name="⏱️ Tempo Total",
-            value=f"**{call_tracker.formatar_tempo(stats['total_segundos'])}**",
-            inline=True)
+            name="\ud83d\udcca Estatísticas Gerais",
+            value=f"\u23f1\ufe0f **Tempo Total:** `{call_tracker.formatar_tempo_hhmmss(stats['total_segundos'])}`\n"
+                  f"\ud83c\udf99\ufe0f **Sessões:** `{stats['total_sessoes']}`\n"
+                  f"\ud83c\udfc6 {rank_text}",
+            inline=False
+        )
 
-        embed.add_field(name="🎙️ Sessões Totais",
-                        value=f"**{stats['total_sessoes']}**",
-                        inline=True)
-
+        # --- Análise de Atividade ---
         embed.add_field(
-            name="📈 Média/Sessão",
-            value=f"**{call_tracker.formatar_tempo(stats['media_segundos'])}**",
-            inline=True)
+            name="\ud83d\udcc8 Análise de Atividade",
+            value=f"\ud83d\udcc9 **Média / Sessão:** `{call_tracker.formatar_tempo_hhmmss(stats['media_segundos'])}`\n"
+                  f"\ud83d\udcc5 **Última Atividade:** {stats['ultima_call'].strftime('%d/%m/%Y às %H:%M')}",
+            inline=False
+        )
 
-        # Status atual
-        tempo_atual = call_tracker.obter_tempo_atual(target_user.id)
-        if tempo_atual:
-            canal_info = call_tracker.usuarios_ativos.get(target_user.id, {})
-            canal_nome = canal_info.get('canal', 'Canal desconhecido')
-
-            embed.add_field(
-                name="🔊 Status Atual",
-                value=
-                f"**Em call no canal:** {canal_nome}\n**Tempo da sessão:** {call_tracker.formatar_tempo(tempo_atual)}",
-                inline=False)
-            embed.color = discord.Color.green()
+        # --- Status Atual ---
+        if target_user.id in call_tracker.usuarios_ativos:
+            dados_sessao = call_tracker.usuarios_ativos[target_user.id]
+            duracao_segundos = (datetime.now(TZ_SAO_PAULO) - dados_sessao['entrada']).total_seconds()
+            status_value = f"""\ud83d\udfe2 **Online** no canal `{dados_sessao['canal']}`
+**Duração:** `{call_tracker.formatar_tempo_hhmmss(duracao_segundos)}`"""
+            embed.color = discord.Color.from_rgb(0, 255, 136) # Verde Neon
         else:
-            embed.add_field(name="🔇 Status Atual",
-                            value="**Offline** - Não está em call no momento",
-                            inline=False)
+            status_value = "\ud83d\udd34 **Offline** - Não está em uma chamada."
 
-        # Histórico
-        if stats['primeira_call']:
-            embed.add_field(
-                name="🎯 Primeira Call",
-                value=
-                f"**{stats['primeira_call'].strftime('%d/%m/%Y às %H:%M')}**",
-                inline=True)
+        embed.add_field(
+            name="\ud83d\udce1 Status da Conexão",
+            value=status_value,
+            inline=False
+        )
 
-        if stats['ultima_call']:
-            embed.add_field(
-                name="📅 Última Call",
-                value=
-                f"**{stats['ultima_call'].strftime('%d/%m/%Y às %H:%M')}**",
-                inline=True)
-
-        # Última sessão detalhada
-        if stats['ultima_sessao']:
-            canal, entrada, saida, duracao = stats['ultima_sessao']
-            entrada_dt = datetime.fromisoformat(entrada)
-            saida_dt = datetime.fromisoformat(saida) if saida else None
-
-            if saida_dt:
-                embed.add_field(
-                    name="📝 Última Sessão",
-                    value=
-                    f"**Canal:** {canal}\n**Duração:** {call_tracker.formatar_tempo(duracao)}\n**Data:** {entrada_dt.strftime('%d/%m/%Y às %H:%M')}",
-                    inline=False)
-
-        # Adiciona autor
-        embed.set_author(name=f"Relatório de {target_user.display_name}",
-                         icon_url=target_user.avatar.url if target_user.avatar
-                         else target_user.default_avatar.url)
-        embed.set_footer(
-            text="Sistema Avançado de Rastreamento • Consulta Detalhada")
+        embed.set_footer(text="Relatório gerado pelo Sistema de Monitoramento MedBot")
 
         await ctx.send(embed=embed)
-        logger.info(
-            f"Comando statscall executado por {ctx.author.name} para {target_user.name}"
-        )
+        logger.info(f"Comando statscall executado por {ctx.author.name} para {target_user.name}")
 
     except Exception as e:
         logger.error(f"Erro no comando statscall: {e}")
-        await ctx.send("❌ Ocorreu um erro ao obter as estatísticas detalhadas!"
-                       )
-
-
-@bot.command(name='topcalls')
-async def top_calls(ctx):
-    """Comando para mostrar estatísticas gerais do servidor"""
-    try:
-        ranking = call_tracker.obter_ranking(5)  # Top 5 para visão geral
-
-        if not ranking:
-            embed = discord.Embed(
-                title="📊 Estatísticas Gerais do Servidor",
-                description=
-                "Ainda não há dados de calls registradas no servidor.",
-                color=discord.Color.orange())
-            await ctx.send(embed=embed)
-            return
-
-        # Calcula estatísticas gerais
-        total_segundos_servidor = sum(user['total_segundos']
-                                      for user in ranking)
-        total_sessoes_servidor = sum(user['total_sessoes'] for user in ranking)
-        usuarios_ativos = len(
-            [user for user in ranking if user['total_segundos'] > 0])
-
-        # Cria embed
-        embed = discord.Embed(
-            title="📊 Estatísticas Gerais do Servidor",
-            description="Resumo da atividade em calls de voz:",
-            color=discord.Color.blue(),
-            timestamp=datetime.now(TZ_SAO_PAULO))
-
-        # Estatísticas gerais
-        embed.add_field(
-            name="⏱️ Tempo Total do Servidor",
-            value=f"**{call_tracker.formatar_tempo(total_segundos_servidor)}**",
-            inline=True)
-
-        embed.add_field(name="🎙️ Sessões Totais",
-                        value=f"**{total_sessoes_servidor}**",
-                        inline=True)
-
-        embed.add_field(name="👥 Usuários Ativos",
-                        value=f"**{usuarios_ativos}**",
-                        inline=True)
-
-        # Top 5 usuários
-        top_users = ""
-        for i, user_data in enumerate(ranking):
-            medal = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"][i]
-            user = ctx.guild.get_member(user_data['user_id'])
-            display_name = user.display_name if user else user_data['user_name']
-
-            top_users += f"{medal} **{display_name}** - {call_tracker.formatar_tempo(user_data['total_segundos'])}\n"
-
-        embed.add_field(name="🏆 Top 5 Usuários", value=top_users, inline=False)
-
-        # Usuários online em call
-        usuarios_online = []
-        for user_id, data in call_tracker.usuarios_ativos.items():
-            user = ctx.guild.get_member(user_id)
-            if user:
-                tempo_atual = call_tracker.obter_tempo_atual(user_id)
-                usuarios_online.append(
-                    f"🔊 **{user.display_name}** - {call_tracker.formatar_tempo(tempo_atual)} ({data['canal']})"
-                )
-
-        if usuarios_online:
-            embed.add_field(
-                name="🔊 Usuários Online em Call",
-                value="\n".join(
-                    usuarios_online[:5]),  # Máximo 5 para não poluir
-                inline=False)
-        else:
-            embed.add_field(name="🔇 Usuários Online em Call",
-                            value="Nenhum usuário em call no momento",
-                            inline=False)
-
-        embed.set_footer(text=f"Estatísticas do Servidor • {ctx.guild.name}")
-
-        await ctx.send(embed=embed)
-        logger.info(f"Comando topcalls executado por {ctx.author.name}")
-
-    except Exception as e:
-        logger.error(f"Erro no comando topcalls: {e}")
-        await ctx.send(
-            "❌ Ocorreu um erro ao obter as estatísticas do servidor!")
+        await ctx.send("\u274c Ocorreu um erro ao gerar o relatório de atividade.")
 
 
 @bot.command(name='analisar')
@@ -1267,6 +1144,7 @@ async def analisar_desempenho(ctx):
                               description="\n".join(interpretacao),
                               color=discord.Color.teal(),
                               timestamp=datetime.now(TZ_SAO_PAULO))
+        embed.set_thumbnail(url=SP_CAPITAL_GIF_URL)
 
         embed.add_field(
             name="⏱️ Tempo Total",
@@ -1305,54 +1183,68 @@ async def analisar_desempenho(ctx):
              aliases=['pontos_consultar'],
              help="Consulta seu histórico de tempo em chamadas.")
 async def consultar_command(ctx, usuario: discord.Member = None):
-    """Consulta o histórico de tempo em chamadas de um usuário com paginação."""
+    """Consulta o histórico de tempo em chamadas de um usuário com a nova interface."""
     if usuario is None:
         usuario = ctx.author
 
+    # Permissão para consultar outros
+    if usuario != ctx.author and not ctx.author.guild_permissions.manage_messages:
+        await ctx.send("❌ Você não tem permissão para consultar o histórico de outros usuários.")
+        return
+
     try:
+        # Obter estatísticas e ranking
+        stats = call_tracker.obter_estatisticas_usuario(usuario.id)
+        rank = call_tracker.get_user_rank(usuario.id)
+        total_segundos_geral = stats['total_segundos'] if stats else 0
+
+        # Obter todas as sessões
         conn = sqlite3.connect(call_tracker.db_path)
         cursor = conn.cursor()
-
         cursor.execute(
             '''
             SELECT id, user_id, user_name, canal, entrada, saida, duracao_segundos
             FROM call_sessions
-            WHERE user_id = ?
+            WHERE user_id = ? AND duracao_segundos IS NOT NULL
             ORDER BY entrada DESC
         ''', (str(usuario.id), ))
-
         sessoes = cursor.fetchall()
         conn.close()
 
         if not sessoes:
             embed = discord.Embed(
-                title="⚕️ Histórico de Atividade em Chamada ⚕️",
-                description=
-                "Não há sessões de voz registradas para este usuário.",
-                color=discord.Color.dark_red())
+                title="📜 Histórico de Atividade",
+                description="💤 Este usuário ainda não possui um histórico de chamadas para exibir.",
+                color=discord.Color.from_rgb(255, 170, 0) # Laranja
+            )
             embed.set_author(name=f"Relatório de: {usuario.display_name}",
-                             icon_url=usuario.avatar.url
-                             if usuario.avatar else usuario.default_avatar.url)
+                             icon_url=usuario.avatar.url if usuario.avatar else usuario.default_avatar.url)
+            embed.set_thumbnail(url=SP_CAPITAL_GIF_URL)
+            embed.set_footer(text="Nenhuma sessão encontrada.")
             await ctx.send(embed=embed)
             return
 
+        # Configura a view de paginação com os novos dados
         view = PaginationView(author=ctx.author,
                               all_sessoes=sessoes,
                               usuario_alvo=usuario,
+                              total_segundos=total_segundos_geral,
+                              rank=rank,
                               items_per_page=5)
 
-        initial_sessoes = view.get_page_data()
-        initial_embed = build_pontos_embed(initial_sessoes, usuario, 1,
-                                           view.total_pages)
+        # Constrói e envia o embed inicial
+        sessoes_iniciais = view.get_page_data()
+        embed = build_consultar_embed(sessoes_iniciais, usuario, 1, view.total_pages, total_segundos_geral, rank)
 
-        await ctx.send(embed=initial_embed, view=view)
+        await ctx.send(embed=embed, view=view)
         logger.info(
-            f"Comando consultar executado por {ctx.author.name} para o usuário {usuario.name}"
+            f"Comando consultar executado por {ctx.author.name} para {usuario.name}"
         )
 
     except Exception as e:
-        logger.error(f"Erro no comando consultar: {e}")
-        await ctx.send("❌ Ocorreu um erro ao consultar o histórico.")
+        logger.error(f"Erro no comando consultar: {e}", exc_info=True)
+        await ctx.send(
+            "❌ Ocorreu um erro ao consultar o histórico de chamadas.")
 
 
 # ============== COMANDO DE AJUDA INTERATIVO ==============
@@ -1365,7 +1257,7 @@ class HelpSelect(discord.ui.Select):
         options = [
             discord.SelectOption(label="Comandos Gerais",
                                  description="Comandos para todos os membros.",
-                                 emoji="🏥"),
+                                 emoji="🛠️"),
             discord.SelectOption(
                 label="Estatísticas de Chamadas",
                 description="Comandos para visualizar tempos e rankings.",
@@ -1373,7 +1265,7 @@ class HelpSelect(discord.ui.Select):
             discord.SelectOption(
                 label="Moderação",
                 description="Comandos para a equipe de moderação.",
-                emoji="🛠️")
+                emoji="🔨")
         ]
         super().__init__(placeholder="Selecione uma categoria...",
                          min_values=1,
@@ -1383,59 +1275,36 @@ class HelpSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         # Obtém a categoria selecionada e cria um novo embed
         selected_category = self.values[0]
-        embed = discord.Embed(title=f"⚕️ Categoria: {selected_category} ⚕️",
-                              color=discord.Color.red(),
+        embed = discord.Embed(title=f"💻 Categoria: {selected_category}",
+                              color=COR_PRINCIPAL,
                               timestamp=datetime.now(TZ_SAO_PAULO))
-        embed.set_footer(
-            text=
-            f"Use !help <comando> para mais detalhes sobre um comando específico."
-        )
+        embed.set_thumbnail(url=SP_CAPITAL_GIF_URL)
+        embed.set_footer(text="Use !help <comando> para mais detalhes.")
 
         if selected_category == "Comandos Gerais":
-            embed.description = "Comandos essenciais disponíveis para todos os membros."
-            embed.add_field(
-                name="`!ping`",
-                value="Verifica a latência e o tempo de resposta do bot.",
-                inline=False)
-            embed.add_field(name="`!tempo`",
-                            value="Mostra a data e hora atuais do servidor.",
-                            inline=False)
-            embed.add_field(
-                name="`!verificar`",
-                value="Inicia o processo de verificação para obter acesso.",
-                inline=False)
-            embed.add_field(name="`!help`",
-                            value="Exibe esta mensagem de ajuda interativa.",
-                            inline=False)
+            embed.description = "Comandos essenciais disponíveis para todos."
+            embed.add_field(name="`!ping`", value="Verifica a latência do bot.", inline=False)
+            embed.add_field(name="`!tempo`", value="Mostra a data e hora atuais.", inline=False)
+            embed.add_field(name="`!help`", value="Exibe esta mensagem de ajuda.", inline=False)
+            embed.add_field(name="`!verificar`", value="Inicia o processo de verificação.", inline=False)
 
         elif selected_category == "Estatísticas de Chamadas":
-            embed.description = "Comandos para consultar seu tempo em chamada e ver rankings."
-            embed.add_field(
-                name="`!minhachamada`",
-                value=
-                "Consulta suas estatísticas pessoais de tempo em chamada.",
-                inline=False)
-            embed.add_field(
-                name="`!consultar`",
-                value="Consulta seu histórico completo de tempo em chamadas.",
-                inline=False)
-            embed.add_field(
-                name="`!rankingchamadas`",
-                value=
-                "Mostra o ranking dos usuários mais ativos em chamadas de voz.",
-                inline=False)
-            embed.add_field(
-                name="`!topcalls`",
-                value="Exibe as estatísticas gerais de chamadas do servidor.",
-                inline=False)
+            embed.description = "Comandos para acompanhar sua atividade em chamadas."
+            embed.add_field(name="`!chamada` (ou `!minhachamada`)", value="Painel com o status da sua chamada atual.", inline=False)
+            embed.add_field(name="`!statscall [usuário]`", value="Relatório de atividade de um usuário (ou seu).", inline=False)
+            embed.add_field(name="`!consultar [usuário]`", value="Seu histórico paginado de sessões.", inline=False)
+            embed.add_field(name="`!rankingchamadas` (ou `!topcalls`)", value="Ranking dos usuários mais ativos.", inline=False)
+            embed.add_field(name="`!analisar`", value="Análise sobre seu desempenho em chamadas.", inline=False)
 
         elif selected_category == "Moderação":
-            embed.description = "Comandos restritos para a equipe de moderação para gerenciar o bot."
-            embed.add_field(
-                name="`!statscall <usuário>`",
-                value=
-                "Consulta as estatísticas de chamada de um usuário específico.",
-                inline=False)
+            embed.description = "Comandos para a equipe administrativa."
+            embed.add_field(name="`!resetcalls` `[usuário]`", value="Reseta os dados de chamadas de um usuário.", inline=False)
+            embed.add_field(name="`!resetallcalls`", value="Reseta todos os dados de chamadas do servidor.", inline=False)
+            embed.add_field(name="`!clear` `[quantidade]`", value="Limpa até 100 mensagens no canal.", inline=False)
+            embed.add_field(name="`!punir` `[membro]` `[nível]`", value="Aplica uma punição (nível 1 ou 2) a um membro.", inline=False)
+            embed.add_field(name="`!setar` `[membro]` `[cargo]`", value="Atribui um cargo profissional a um membro.", inline=False)
+            embed.add_field(name="`!say` `[canal]` `[mensagem]`", value="Envia uma mensagem através do bot.", inline=False)
+            embed.add_field(name="`!hierarquia`", value="Mostra a hierarquia de cargos do servidor.", inline=False)
 
         # Edita a mensagem original com o novo embed da categoria
         await interaction.response.edit_message(embed=embed)
@@ -1453,14 +1322,11 @@ class HelpView(discord.ui.View):
 async def help_command(ctx):
     """Mostra uma mensagem de ajuda interativa com um menu de seleção."""
     embed = discord.Embed(
-        title="⚕️ Central de Ajuda do MedBot ⚕️",
-        description="Bem-vindo(a) à central de ajuda!\n\n"
-        "Use o menu suspenso abaixo para navegar pelas categorias de comandos. "
-        "Cada categoria listará os comandos disponíveis e suas funções.",
-        color=discord.Color.dark_red(),
+        title="💻 Central de Ajuda do MedBot",
+        description="Bem-vindo(a) à central de ajuda! Use o menu abaixo para navegar pelas categorias de comandos.",
+        color=COR_PRINCIPAL,
         timestamp=datetime.now(TZ_SAO_PAULO))
-    if ctx.bot.user.avatar:
-        embed.set_thumbnail(url=ctx.bot.user.avatar.url)
+    embed.set_thumbnail(url=SP_CAPITAL_GIF_URL)
     embed.set_footer(text="Selecione uma categoria para ver os comandos.")
 
     view = HelpView()
@@ -1654,12 +1520,415 @@ class VerificationView(discord.ui.View):
         await interaction.response.send_modal(modal)
 
 
+# ============== COMANDOS ADMINISTRATIVOS ==============
+
+@bot.command(name='resetcalls')
+@commands.has_permissions(administrator=True)
+async def reset_calls(ctx, usuario: discord.Member):
+    """Apaga todos os dados de chamadas de um usuário (Apenas Admin)."""
+    if not usuario:
+        await ctx.send("❌ Você precisa mencionar um usuário para resetar os dados.")
+        return
+
+    view = ConfirmationView(author=ctx.author, target_user=usuario)
+
+    embed = discord.Embed(
+        title="⚠️ Confirmação de Exclusão de Dados ⚠️",
+        description=f"Você está prestes a apagar **TODOS** os registros de chamadas de **{usuario.mention}**.\n\n"
+                    f"Esta ação é **irreversível**.\n\n"
+                    "Por favor, confirme sua decisão clicando nos botões abaixo.",
+        color=discord.Color.dark_red()
+    )
+    embed.set_footer(text="Esta solicitação expirá em 60 segundos.")
+
+    confirmation_message = await ctx.send(embed=embed, view=view)
+
+    await view.wait()
+
+    for item in view.children:
+        item.disabled = True
+
+    if view.confirmed is True:
+        if call_tracker.reset_user_calls(usuario.id):
+            success_embed = discord.Embed(
+                title="✅ Dados Apagados com Sucesso",
+                description=f"Todos os registros de chamadas e estatísticas de {usuario.mention} foram permanentemente apagados.",
+                color=discord.Color.green()
+            )
+            await confirmation_message.edit(embed=success_embed, view=view)
+            logger.info(f"O administrador {ctx.author.name} resetou os dados de {usuario.name}.")
+        else:
+            error_embed = discord.Embed(
+                title="❌ Erro na Exclusão",
+                description=f"Ocorreu um erro ao tentar apagar os dados de {usuario.mention}. Verifique os logs.",
+                color=discord.Color.red()
+            )
+            await confirmation_message.edit(embed=error_embed, view=view)
+
+    elif view.confirmed is False:
+        cancel_embed = discord.Embed(
+            title="🚫 Operação Cancelada",
+            description=f"A exclusão dos dados de {usuario.mention} foi cancelada.",
+            color=discord.Color.light_grey()
+        )
+        await confirmation_message.edit(embed=cancel_embed, view=view)
+
+    else:  # Timeout
+        timeout_embed = discord.Embed(
+            title="⏳ Tempo Esgotado",
+            description=f"A solicitação para apagar os dados de {usuario.mention} expirou e foi cancelada.",
+            color=discord.Color.orange()
+        )
+        await confirmation_message.edit(embed=timeout_embed, view=view)
+
+@reset_calls.error
+async def reset_calls_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Você não tem permissão de administrador para usar este comando.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("❌ Por favor, mencione o usuário cujos dados você deseja resetar. Ex: `!resetcalls @usuario`")
+    else:
+        logger.error(f"Erro inesperado no comando !resetcalls: {error}")
+        await ctx.send("❌ Ocorreu um erro inesperado ao processar o comando.")
+
+
+class ResetAllConfirmationView(discord.ui.View):
+    """View para confirmação de reset geral de dados."""
+    def __init__(self, author: discord.Member):
+        super().__init__(timeout=60)
+        self.author = author
+        self.confirmed = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message(
+                "❌ Apenas o autor do comando pode confirmar esta ação.",
+                ephemeral=True)
+            return False
+        return True
+
+    async def disable_buttons(self, interaction: discord.Interaction):
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="DESTRUIR TODOS OS DADOS", style=discord.ButtonStyle.danger, emoji="💥")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.confirmed = True
+        await self.disable_buttons(interaction)
+        self.stop()
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.confirmed = False
+        await self.disable_buttons(interaction)
+        self.stop()
+
+
+@bot.command(name='resetallcalls', aliases=['resetgeral'])
+@commands.has_permissions(administrator=True)
+async def reset_all_calls_command(ctx):
+    """Apaga TODOS os dados de chamadas do servidor (Apenas Admin)."""
+    view = ResetAllConfirmationView(author=ctx.author)
+
+    embed = discord.Embed(
+        title="🚨 ALERTA MÁXIMO: RESET GERAL DE DADOS 🚨",
+        description=(
+            f"Você está prestes a apagar **TODOS OS REGISTROS DE CHAMADAS DE TODOS OS USUÁRIOS** do servidor.\n\n"
+            "**ESTA AÇÃO É IRREVERSÍVEL E DESTRUIRÁ TODOS OS DADOS DE TEMPO EM CALL.**\n\n"
+            "Tem certeza absoluta de que deseja prosseguir?"
+        ),
+        color=discord.Color.from_rgb(255, 0, 0)
+    )
+    embed.set_footer(text="Esta solicitação de alto risco expira em 60 segundos.")
+    embed.set_thumbnail(url=SP_CAPITAL_GIF_URL)
+
+    confirmation_message = await ctx.send(embed=embed, view=view)
+
+    await view.wait()
+
+    if view.confirmed is True:
+        if call_tracker.reset_all_calls():
+            success_embed = discord.Embed(
+                title="✅ Reset Geral Concluído",
+                description="Todos os dados de chamadas do servidor foram permanentemente apagados.",
+                color=COR_VERDE
+            )
+            await confirmation_message.edit(embed=success_embed, view=None)
+        else:
+            error_embed = discord.Embed(
+                title="❌ Erro no Reset Geral",
+                description="Ocorreu um erro ao tentar apagar os dados. Verifique os logs do bot.",
+                color=COR_PRINCIPAL
+            )
+            await confirmation_message.edit(embed=error_embed, view=None)
+    elif view.confirmed is False:
+        cancel_embed = discord.Embed(
+            title="🚫 Operação Cancelada",
+            description="O reset geral de dados foi cancelado.",
+            color=COR_LARANJA
+        )
+        await confirmation_message.edit(embed=cancel_embed, view=None)
+    else: # Timeout
+        timeout_embed = discord.Embed(
+            title="⏰ Tempo Esgotado",
+            description="A solicitação para resetar os dados expirou.",
+            color=discord.Color.greyple()
+        )
+        await confirmation_message.edit(embed=timeout_embed, view=None)
+
+
+@reset_all_calls_command.error
+async def reset_all_calls_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Você não tem permissão de administrador para usar este comando.")
+    else:
+        logger.error(f"Erro inesperado no comando !resetallcalls: {error}")
+        await ctx.send("❌ Ocorreu um erro inesperado ao processar o comando.")
+
+
+# ============== COMANDOS DE MODERAÇÃO ==============
+
+@bot.command(name='say')
+@commands.has_permissions(administrator=True)
+async def say_command(ctx, canal: discord.TextChannel, *, mensagem: str):
+    """Envia uma mensagem para um canal específico."""
+    try:
+        await canal.send(mensagem)
+        await ctx.message.add_reaction('✅')
+        await ctx.message.delete(delay=5)
+    except discord.Forbidden:
+        await ctx.send(f"❌ O bot não tem permissão para enviar mensagens no canal {canal.mention}.")
+    except Exception as e:
+        await ctx.send("❌ Ocorreu um erro ao tentar enviar a mensagem.")
+        logger.error(f"Erro no comando !say: {e}")
+
+@say_command.error
+async def say_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Você não tem permissão de administrador para usar este comando.")
+    elif isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
+        await ctx.send("❌ Uso incorreto. Exemplo: `!say #canal Sua mensagem aqui`")
+    elif isinstance(error, commands.ChannelNotFound):
+        await ctx.send("❌ Canal não encontrado. Por favor, mencione um canal de texto válido.")
+    else:
+        logger.error(f"Erro inesperado no comando !say: {error}")
+        await ctx.send("❌ Ocorreu um erro inesperado ao processar o comando.")
+
+@bot.command(name='clear', aliases=['limpar'])
+@commands.has_permissions(manage_messages=True)
+async def clear_command(ctx, amount: int):
+    """Limpa uma quantidade de mensagens no canal (máximo: 100)."""
+    if amount <= 0:
+        await ctx.send("❌ Por favor, insira um número positivo de mensagens para apagar.")
+        return
+    if amount > 100:
+        await ctx.send("❌ Não é possível limpar mais de 100 mensagens de uma vez.")
+        return
+
+    # O +1 é para apagar o comando !clear também
+    deleted = await ctx.channel.purge(limit=amount + 1)
+    await ctx.send(f"✅ {len(deleted) - 1} mensagens foram limpas por {ctx.author.mention}.", delete_after=5)
+    logger.info(f"{ctx.author.name} limpou {len(deleted) - 1} mensagens no canal {ctx.channel.name}.")
+
+@clear_command.error
+async def clear_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Você não tem permissão para gerenciar mensagens.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("❌ Uso incorreto. Exemplo: `!clear 10`")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send("❌ Por favor, forneça um número válido de mensagens para limpar.")
+    else:
+        logger.error(f"Erro no comando !clear: {error}")
+        await ctx.send("❌ Ocorreu um erro ao tentar limpar as mensagens.")
+
+
+@bot.command(name='punir')
+@commands.has_permissions(administrator=True)
+async def punir_command(ctx, membro: discord.Member, nivel: int):
+    """Aplica um cargo de punição a um membro (nível 1 ou 2)."""
+    if nivel not in [1, 2]:
+        await ctx.send("❌ Nível de punição inválido. Use 1 ou 2.")
+        return
+
+    cargo_id = CARGO_PUNICAO_1_ID if nivel == 1 else CARGO_PUNICAO_2_ID
+    cargo = ctx.guild.get_role(cargo_id)
+
+    if not cargo:
+        await ctx.send(f"❌ O cargo de Punição {nivel} não foi encontrado no servidor.")
+        logger.error(f"Cargo de Punição {nivel} (ID: {cargo_id}) não encontrado.")
+        return
+
+    try:
+        await membro.add_roles(cargo)
+        embed = discord.Embed(
+            title="⚖️ Punição Aplicada",
+            description=f"O membro {membro.mention} recebeu o cargo **{cargo.name}**.",
+            color=COR_PRINCIPAL,
+            timestamp=datetime.now(TZ_SAO_PAULO)
+        )
+        embed.set_footer(text=f"Ação executada por {ctx.author.display_name}")
+        await ctx.send(embed=embed)
+        logger.info(f"{ctx.author.name} aplicou a punição de nível {nivel} em {membro.name}.")
+
+        # Envia o log para o canal de moderação
+        canal_log_mod = bot.get_channel(CANAL_MODERACAO_ID)
+        if canal_log_mod:
+            log_embed = discord.Embed(
+                title="📝 Log de Punição",
+                color=COR_LARANJA,
+                timestamp=datetime.now(TZ_SAO_PAULO)
+            )
+            log_embed.add_field(name="Usuário Punido", value=membro.mention, inline=True)
+            log_embed.add_field(name="Moderador", value=ctx.author.mention, inline=True)
+            log_embed.add_field(name="Punição Aplicada", value=f"**{cargo.name}** (Nível {nivel})", inline=False)
+            log_embed.set_footer(text=f"ID do Usuário: {membro.id}")
+
+            try:
+                await canal_log_mod.send(embed=log_embed)
+            except Exception as e:
+                logger.error(f"Falha ao enviar log de punição para o canal {CANAL_MODERACAO_ID}: {e}")
+        else:
+            logger.warning(f"Canal de log de moderação (ID: {CANAL_MODERACAO_ID}) não encontrado.")
+    except discord.Forbidden:
+        await ctx.send("❌ O bot não tem permissão para adicionar este cargo.")
+    except Exception as e:
+        await ctx.send("❌ Ocorreu um erro ao tentar aplicar a punição.")
+        logger.error(f"Erro no comando !punir: {e}")
+
+@punir_command.error
+async def punir_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Você não tem permissão de administrador para usar este comando.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("❌ Uso incorreto. Exemplo: `!punir @membro 1`")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send("❌ Argumentos inválidos. Certifique-se de mencionar um membro e fornecer um nível de punição (1 ou 2).")
+    else:
+        logger.error(f"Erro inesperado no comando !punir: {error}")
+        await ctx.send("❌ Ocorreu um erro inesperado ao processar o comando.")
+
+
+@bot.command(name='setar')
+@commands.has_permissions(administrator=True)
+async def setar_cargo_command(ctx, membro: discord.Member, cargo: discord.Role):
+    """Atribui um cargo profissional a um membro."""
+    cargos_permitidos = CARGOS_SETAveis_IDS
+
+    if cargo.id not in cargos_permitidos:
+        await ctx.send("❌ Você só pode setar os cargos de `Paramédico`, `Médico` ou `Enfermeiro`.")
+        return
+
+    try:
+        await membro.add_roles(cargo)
+        embed = discord.Embed(
+            title="✅ Cargo Atribuído",
+            description=f"O membro {membro.mention} agora tem o cargo {cargo.mention}.",
+            color=COR_VERDE,
+            timestamp=datetime.now(TZ_SAO_PAULO)
+        )
+        embed.set_footer(text=f"Ação executada por {ctx.author.display_name}")
+        await ctx.send(embed=embed)
+        logger.info(f"{ctx.author.name} setou o cargo {cargo.name} para {membro.name}.")
+    except discord.Forbidden:
+        await ctx.send("❌ O bot não tem permissão para gerenciar este cargo.")
+    except Exception as e:
+        await ctx.send("❌ Ocorreu um erro ao tentar atribuir o cargo.")
+        logger.error(f"Erro no comando !setar: {e}")
+
+@setar_cargo_command.error
+async def setar_cargo_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Você não tem permissão de administrador para usar este comando.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("❌ Uso incorreto. Exemplo: `!setar @membro @cargo`")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send("❌ Argumentos inválidos. Certifique-se de mencionar um membro e um cargo válidos.")
+    else:
+        logger.error(f"Erro inesperado no comando !setar: {error}")
+        await ctx.send("❌ Ocorreu um erro inesperado ao processar o comando.")
+
+
+class HierarquiaView(discord.ui.View):
+    def __init__(self, ctx, cargos_por_pagina=3):
+        super().__init__(timeout=180)
+        self.ctx = ctx
+        self.cargos_por_pagina = cargos_por_pagina
+        self.pagina_atual = 0
+        self.total_paginas = (len(HIERARQUIA_CARGOS) + self.cargos_por_pagina - 1) // self.cargos_por_pagina
+
+    async def criar_embed_pagina(self):
+        start_index = self.pagina_atual * self.cargos_por_pagina
+        end_index = start_index + self.cargos_por_pagina
+        cargos_da_pagina = HIERARQUIA_CARGOS[start_index:end_index]
+
+        embed = discord.Embed(
+            title="📊 Estrutura Hierárquica do Servidor",
+            description="*Atualizado ao vivo - Mostrando cargos e membros organizados por autoridade*",
+            color=COR_PRINCIPAL
+        )
+
+        total_membros_listados = 0
+        for cargo_info in cargos_da_pagina:
+            cargo = self.ctx.guild.get_role(cargo_info['id'])
+            if cargo:
+                membros = [m.mention for m in cargo.members if not m.bot]
+                total_membros_listados += len(membros)
+                membros_str = '\n'.join(membros) if membros else "Nenhum membro encontrado."
+                embed.add_field(
+                    name=f"{cargo_info['emoji']} **{cargo.name}**",
+                    value=membros_str,
+                    inline=False
+                )
+
+        embed.set_footer(text=f"Página {self.pagina_atual + 1}/{self.total_paginas} | 👥 Total de membros listados: {total_membros_listados}")
+        return embed
+
+    async def atualizar_botoes(self):
+        self.children[0].disabled = self.pagina_atual == 0
+        self.children[1].disabled = self.pagina_atual == self.total_paginas - 1
+
+    @discord.ui.button(label="Anterior", style=discord.ButtonStyle.grey)
+    async def anterior_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.pagina_atual > 0:
+            self.pagina_atual -= 1
+            await self.atualizar_botoes()
+            embed = await self.criar_embed_pagina()
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Próximo", style=discord.ButtonStyle.grey)
+    async def proximo_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.pagina_atual < self.total_paginas - 1:
+            self.pagina_atual += 1
+            await self.atualizar_botoes()
+            embed = await self.criar_embed_pagina()
+            await interaction.response.edit_message(embed=embed, view=self)
+
+@bot.command(name='hierarquia')
+@commands.has_permissions(administrator=True)
+async def hierarquia_command(ctx):
+    """Mostra a hierarquia de cargos do servidor com paginação."""
+    view = HierarquiaView(ctx)
+    await view.atualizar_botoes()
+    embed = await view.criar_embed_pagina()
+    await ctx.send(embed=embed, view=view)
+
+@hierarquia_command.error
+async def hierarquia_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Você não tem permissão para usar este comando.")
+    else:
+        logger.error(f"Erro inesperado no comando !hierarquia: {error}")
+        await ctx.send("❌ Ocorreu um erro inesperado.")
+
+
 # ==================== EXECUÇÃO ====================
 
 import os
 from dotenv import load_dotenv
 
-
+[{ ... }]
 async def main():
     """Função principal para iniciar o bot"""
     try:
